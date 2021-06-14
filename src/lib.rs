@@ -1,7 +1,9 @@
-#[warn(missing_docs, missing_debug_implementations)]
-pub mod arg;
-pub mod module;
+#[warn(missing_docs)]
+mod arg;
+mod module;
 
 pub type ErrorType = String;
 
-pub use qc_macros::*;
+pub use qc_macros::module;
+pub use module::*;
+pub use arg::*;

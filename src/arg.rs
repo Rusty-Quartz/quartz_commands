@@ -72,10 +72,17 @@ impl<'cmd> ArgumentTraverser<'cmd> {
         // Used for escaping quotes with the '\' character
         let mut ignore_quote = false;
 
-        while in_quotes || !matches!(self.chars.peek().copied(), Some((_, ' '))) {
-            let (index, ch) = match self.chars.next() {
-                Some((index, ch)) => (index, ch),
-                None => break,
+        self.index = loop {
+            if !in_quotes {
+                match self.chars.peek().copied() {
+                    Some((index, ' ')) => break index,
+                    _ => {}
+                }
+            }
+
+            let ch = match self.chars.next() {
+                Some((_, ch)) => ch,
+                None => break self.command.len(),
             };
 
             // Manage strings
@@ -99,9 +106,7 @@ impl<'cmd> ArgumentTraverser<'cmd> {
             if ch == '\\' {
                 ignore_quote = true;
             }
-
-            self.index = index;
-        }
+        };
 
         Some(&self.command[self.anchor .. self.index])
     }
@@ -114,6 +119,8 @@ impl<'cmd> ArgumentTraverser<'cmd> {
     }
 }
 
+/// Trait for matching and converting string arguments to concrete types. Any type which implements this
+/// trait can be used as a node type in a command module.
 pub trait FromArgument<'a, C>: Sized {
     /// Returns whether or not the given argument matches the format of `Self`. Returning true does
     /// not imply that [`from_arg`](crate::arg::FromArgument::from_arg) will succeed, but it does
@@ -321,5 +328,22 @@ impl<'a, C> FromArgument<'a, C> for char {
                 None => Ok(ch),
             }
         }
+    }
+}
+
+impl<'a, C, T> FromArgument<'a, C> for Option<T>
+where
+    T: FromArgument<'a, C>,
+{
+    fn matches(arg: &str) -> bool {
+        T::matches(arg)
+    }
+
+    fn partial_matches(partial_arg: &str) -> bool {
+        T::partial_matches(partial_arg)
+    }
+
+    fn from_arg(arg: &'a str, context: &C) -> Result<Self, String> {
+        Ok(Some(T::from_arg(arg, context)?))
     }
 }
