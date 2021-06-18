@@ -27,8 +27,7 @@ module! {
             Ok(())
         };
 
-        additional suggests |ctx, arg| {
-            println!("{}", arg);
+        additional suggests |ctx, _arg| {
             vec!["10".to_owned(), "20".to_owned()]
         };
     }

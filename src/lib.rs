@@ -1,8 +1,12 @@
-#[warn(missing_docs)]
+#![warn(missing_docs)]
+
+//! 
+
 mod arg;
 mod module;
 
-pub type ErrorType = String;
+/// The crate's error type. This is subject to change in the future.
+pub type Error = String;
 
 pub use qc_macros::module;
 pub use module::*;

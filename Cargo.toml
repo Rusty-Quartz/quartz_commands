@@ -10,4 +10,4 @@ regex = "1.5.4"
 qc_macros = { version = "*", path = "./qc_macros" }
 
 [[example]]
-name = "sample"
+name = "simple"

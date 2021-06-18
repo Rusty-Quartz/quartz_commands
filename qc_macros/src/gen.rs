@@ -117,7 +117,7 @@ pub fn generate_module(input: CommandModule) -> TokenStream {
         }
 
         impl<#context_lifetime> ::quartz_commands::CommandModule<#context_type> for #module_struct_name {
-            fn dispatch(&self, __command: &str, __context: #context_type) -> ::core::result::Result<(), ::std::string::String> {
+            fn dispatch(&self, __command: &str, __context: #context_type) -> ::core::result::Result<(), ::quartz_commands::Error> {
                 let mut __args = ::quartz_commands::ArgumentTraverser::new(__command);
                 match __args.next() {
                     #( #module_dispatch_arms, )*
@@ -659,7 +659,7 @@ impl<'a> NodeGraph<'a> {
                     mut __args: ::quartz_commands::ArgumentTraverser<'cmd>,
                     mut #node_dispatch_fn_context_names: #context_type,
                     mut __data: #data_mod_name::#data_struct_name<'cmd>
-                ) -> ::core::result::Result<(), ::std::string::String>
+                ) -> ::core::result::Result<(), ::quartz_commands::Error>
                 {
                     #node_dispatch_fn_matches
                 }
@@ -669,7 +669,7 @@ impl<'a> NodeGraph<'a> {
                 mut __args: ::quartz_commands::ArgumentTraverser<'cmd>,
                 mut #root_dispatch_context_name: #context_type,
                 mut __data: #data_mod_name::#data_struct_name<'cmd>
-            ) -> ::core::result::Result<(), ::std::string::String>
+            ) -> ::core::result::Result<(), ::quartz_commands::Error>
             {
                 #root_dispatch_match
             }
@@ -891,7 +891,7 @@ impl<'a> NodeGraph<'a> {
                         };
                         Some(quote! {
                             if <#ty as ::quartz_commands::FromArgument<'cmd, #context_type>>::partial_matches(__arg) {
-                                if let Ok(value) = <#ty as ::quartz_commands::FromArgument<'cmd, _>>::from_arg(__arg, &#context_ident) {
+                                if let ::core::result::Result::Ok(value) = <#ty as ::quartz_commands::FromArgument<'cmd, _>>::from_arg(__arg, &#context_ident) {
                                     __data.#arg_name = #var_wrapper (value);
                                 }
                                 __suggestions.extend(Self::#get_suggestions_fn(__args, #context_ident, __arg, __data));

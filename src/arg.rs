@@ -2,6 +2,8 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use std::{iter::Peekable, str::CharIndices};
 
+use crate::Error;
+
 /// Iterates over the individual arguments in a command accounting for quoted arguments.
 pub struct ArgumentTraverser<'cmd> {
     command: &'cmd str,
@@ -142,7 +144,7 @@ pub trait FromArgument<'a, C>: Sized {
     /// Parses the given argument given a context. This function should only fail if it is impossible
     /// to construct a valid `Self` from the given string and context. Any logical checks should be
     /// performed in execution blocks.
-    fn from_arg(arg: &'a str, context: &C) -> Result<Self, String>;
+    fn from_arg(arg: &'a str, context: &C) -> Result<Self, Error>;
 }
 
 macro_rules! impl_from_arg_for_int {
@@ -152,7 +154,7 @@ macro_rules! impl_from_arg_for_int {
                 arg.chars().all(|ch| ch.is_digit(10))
             }
 
-            fn from_arg(arg: &'a str, _ctx: &C) -> Result<Self, String> {
+            fn from_arg(arg: &'a str, _ctx: &C) -> Result<Self, Error> {
                 arg.parse::<$int>().map_err(|e| e.to_string())
             }
         }
@@ -195,7 +197,7 @@ macro_rules! impl_from_arg_fo_float {
                 PARTIAL.is_match(partial_arg)
             }
 
-            fn from_arg(arg: &'a str, _ctx: &C) -> Result<Self, String> {
+            fn from_arg(arg: &'a str, _ctx: &C) -> Result<Self, Error> {
                 let suffix_index = arg
                     .char_indices()
                     .rev()
@@ -247,7 +249,7 @@ impl<'a, C> FromArgument<'a, C> for String {
         true
     }
 
-    fn from_arg(arg: &'a str, _ctx: &C) -> Result<Self, String> {
+    fn from_arg(arg: &'a str, _ctx: &C) -> Result<Self, Error> {
         if arg.len() < 2 {
             Ok(arg.to_owned())
         } else {
@@ -268,7 +270,7 @@ impl<'a, C> FromArgument<'a, C> for &'a str {
         true
     }
 
-    fn from_arg(arg: &'a str, _ctx: &C) -> Result<Self, String> {
+    fn from_arg(arg: &'a str, _ctx: &C) -> Result<Self, Error> {
         if arg.len() < 2 {
             Ok(arg)
         } else {
@@ -293,7 +295,7 @@ impl<'a, C> FromArgument<'a, C> for bool {
         "true".starts_with(partial_arg) || "false".starts_with(partial_arg)
     }
 
-    fn from_arg(arg: &str, _ctx: &C) -> Result<Self, String> {
+    fn from_arg(arg: &str, _ctx: &C) -> Result<Self, Error> {
         match arg {
             "true" => Ok(true),
             "false" => Ok(false),
@@ -314,7 +316,7 @@ impl<'a, C> FromArgument<'a, C> for char {
         partial_arg.chars().count() <= 1
     }
 
-    fn from_arg(arg: &str, _ctx: &C) -> Result<Self, String> {
+    fn from_arg(arg: &str, _ctx: &C) -> Result<Self, Error> {
         if arg.is_empty() {
             Err("Cannot parse an empty argument into a character".to_owned())
         } else {
@@ -343,7 +345,7 @@ where
         T::partial_matches(partial_arg)
     }
 
-    fn from_arg(arg: &'a str, context: &C) -> Result<Self, String> {
+    fn from_arg(arg: &'a str, context: &C) -> Result<Self, Error> {
         Ok(Some(T::from_arg(arg, context)?))
     }
 }
