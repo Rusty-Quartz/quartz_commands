@@ -7,7 +7,7 @@ module! {
 
     command simple
     where
-        additional: u32 => any[more: u32, "log"],
+        additional: u32,
     {
         additional executes |ctx| {
             *ctx += additional;
@@ -15,25 +15,20 @@ module! {
             Ok(())
         };
 
-        "log" executes |ctx| {
-            *ctx += additional;
-            println!("Value: {}", *ctx);
-            Ok(())
-        };
-
-        more executes |ctx| {
-            *ctx += additional + more;
-            println!("Additional: {}, More: {}", additional, more);
-            Ok(())
-        };
-
-        additional suggests |ctx, _arg| {
+        additional suggests |_ctx, _arg| {
             vec!["10".to_owned(), "20".to_owned()]
         };
+    }
+
+    command suggtest
+    where
+        "apple" => "orange"
+    {
+        "orange" executes |_ctx| Ok(());
     }
 }
 
 fn main() {
     let mut x: u32 = 5;
-    println!("{:?}", (Test).get_suggestions("simple 1", &&mut x));
+    println!("{:?}", (Test).get_suggestions("suggtest apple ", &&mut x));
 }

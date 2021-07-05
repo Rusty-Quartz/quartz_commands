@@ -1,8 +1,8 @@
-use crate::keyword;
+use crate::{keyword, path_matches};
 use once_cell::unsync::OnceCell;
 use proc_macro2::{Span, TokenStream};
-use quote::{quote, IdentFragment, ToTokens, TokenStreamExt};
-use std::fmt::{self, Display, Formatter};
+use quote::{quote, IdentFragment, ToTokens, TokenStreamExt, format_ident};
+use std::{collections::hash_map::DefaultHasher, fmt::{self, Display, Formatter}, hash::{Hash, Hasher}};
 use syn::{
     braced,
     bracketed,
@@ -16,6 +16,7 @@ use syn::{
     GenericParam,
     Ident,
     ItemType,
+    TypeReference,
     Lifetime,
     Lit,
     LitStr,
@@ -180,11 +181,16 @@ pub enum Node {
     Argument {
         name: StrIdent,
         colon: Option<Token![:]>,
+        greedy: Option<keyword::greedy>,
         ty: Option<Type>,
         eq: Option<Token![=]>,
         default: Option<Lit>,
     },
-    Literal(LitStrRef),
+    Literal {
+        lit: LitStrRef,
+        as_token: Option<Token![as]>,
+        renamed: Option<StrIdent>
+    },
     CommandRoot(keyword::root),
     Any {
         any: keyword::any,
@@ -195,7 +201,7 @@ pub enum Node {
 impl Node {
     pub fn flatten(&self) -> FlattenNodeIter<'_> {
         match self {
-            Node::Argument { .. } | Node::Literal(_) | Node::CommandRoot(_) =>
+            Node::Argument { .. } | Node::Literal { .. } | Node::CommandRoot(_) =>
                 FlattenNodeIter::Singleton(Some(self)),
             Node::Any { nodes, .. } => FlattenNodeIter::Multiple(nodes.into_iter()),
         }
@@ -204,7 +210,25 @@ impl Node {
     pub fn name(&self) -> &str {
         match self {
             Node::Argument { name, .. } => name.as_str(),
-            Node::Literal(lit) => lit.as_str(),
+            Node::Literal { lit, renamed, .. } => match renamed {
+                Some(name) => name.as_str(),
+                None => lit.as_str()
+            },
+            _ => panic!("Only `Argument` and `Literal` node types have names."),
+        }
+    }
+
+    pub fn unique_ident(&self) -> Ident {
+        match self {
+            Node::Argument { name, .. } => name.ident.clone(),
+            Node::Literal { lit, renamed, .. } => match renamed {
+                Some(name) => name.ident.clone(),
+                None => {
+                    let mut state = DefaultHasher::new();
+                    lit.as_str().hash(&mut state);
+                    format_ident!("lit{:x}", state.finish())
+                }
+            },
             _ => panic!("Only `Argument` and `Literal` node types have names."),
         }
     }
@@ -239,11 +263,37 @@ impl Parse for Node {
             }
         } else if lookahead.peek(Ident) {
             let name = input.parse()?;
-            let (colon, ty) = if input.peek(Token![:]) {
+            let (colon, ty, greedy) = if input.peek(Token![:]) {
                 let colon: Token![:] = input.parse()?;
-                (Some(colon), Some(input.parse()?))
+                let greedy: Option<keyword::greedy> = if input.peek(keyword::greedy) {
+                    Some(input.parse()?)
+                } else {
+                    None
+                };
+                let ty = if greedy.is_some() {
+                    let ty = input.parse()?;
+                    let is_valid = match &ty {
+                        Type::Reference(TypeReference { elem, .. }) => {
+                            match &**elem {
+                                Type::Path(type_path) => path_matches(type_path, "str"),
+                                _ => false
+                            }
+                        },
+                        Type::Path(type_path) => path_matches(type_path, "String"),
+                        _ => false
+                    };
+
+                    if !is_valid {
+                        return Err(Error::new(ty.span(), "Greedy arguments must be of type String or &str."));
+                    }
+
+                    ty
+                } else {
+                    input.parse()?
+                };
+                (Some(colon), Some(ty), greedy)
             } else {
-                (None, None)
+                (None, None, None)
             };
 
             let (eq, default) = if input.peek(Token![=]) && !input.peek(Token![=>]) {
@@ -265,6 +315,7 @@ impl Parse for Node {
             Ok(Node::Argument {
                 name,
                 colon,
+                greedy,
                 ty,
                 eq,
                 default,
@@ -280,7 +331,16 @@ impl Parse for Node {
                      '\\'",
                 ))
             } else {
-                Ok(Node::Literal(lit))
+                let (as_token, renamed) = if input.peek(Token![as]) {
+                    (Some(input.parse()?), Some(input.parse()?))
+                } else {
+                    (None, None)
+                };
+                Ok(Node::Literal {
+                    lit,
+                    as_token,
+                    renamed
+                })
             }
         } else {
             Err(lookahead.error())
@@ -294,13 +354,14 @@ impl ToTokens for Node {
             Node::Argument {
                 name,
                 colon,
+                greedy,
                 ty,
                 eq,
                 default,
             } => quote! {
-                #name #colon #ty #eq #default
+                #name #colon #greedy #ty #eq #default
             },
-            Node::Literal(lit) => quote! { #lit },
+            Node::Literal { lit, as_token, renamed } => quote! { #lit #as_token #renamed },
             Node::CommandRoot(root) => quote! { #root },
             Node::Any { any, nodes } => quote! {
                 #any [ #nodes ]
@@ -554,10 +615,6 @@ pub struct LitStrRef {
 }
 
 impl LitStrRef {
-    pub fn inner(&self) -> &LitStr {
-        &self.lit_str
-    }
-
     pub fn as_str(&self) -> &str {
         &self.as_string
     }

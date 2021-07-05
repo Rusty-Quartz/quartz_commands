@@ -147,6 +147,50 @@ pub trait FromArgument<'a, C>: Sized {
     fn from_arg(arg: &'a str, context: &C) -> Result<Self, Error>;
 }
 
+/// A wrapper around arguments which could be interpreted as the user ask for help with a command. This
+/// wrapper will match on `help`, and `h` prefixed by zero, one, or two hyphens.
+pub struct Help<'a> {
+    /// The exact string the user typed.
+    pub verbatim: &'a str
+}
+
+impl<'a> Help<'a> {
+    /// Shorthand for `vec!["-help".to_owned()]` to make suggestion handler bindings less cumbersome.
+    #[inline]
+    pub fn suggestions() -> Vec<String> {
+        vec!["-help".to_owned()]
+    }
+}
+
+impl<'a, C> FromArgument<'a, C> for Help<'a> {
+    fn matches(arg: &str) -> bool {
+        matches!(arg, "help" | "-help" | "--help" | "-h" | "--h")
+    }
+
+    fn partial_matches(partial_arg: &str) -> bool {
+        match partial_arg.len() {
+            0 => true,
+            1 => partial_arg == "-" || partial_arg == "h",
+            _ => {
+                let stripped = if partial_arg.starts_with("--") {
+                    &partial_arg[2..]
+                } else if partial_arg.starts_with("-") {
+                    &partial_arg[1..]
+                } else {
+                    partial_arg
+                };
+                "help".starts_with(stripped)
+            }
+        }
+    }
+
+    fn from_arg(arg: &'a str, _context: &C) -> Result<Self, Error> {
+        Ok(Help {
+            verbatim: arg
+        })
+    }
+}
+
 macro_rules! impl_from_arg_for_int {
     ($int:ty) => {
         impl<'a, C> FromArgument<'a, C> for $int {
@@ -347,5 +391,22 @@ where
 
     fn from_arg(arg: &'a str, context: &C) -> Result<Self, Error> {
         Ok(Some(T::from_arg(arg, context)?))
+    }
+}
+
+impl<'a, C, T> FromArgument<'a, C> for Box<T>
+where
+    T: FromArgument<'a, C>
+{
+    fn matches(arg: &str) -> bool {
+        T::matches(arg)
+    }
+
+    fn partial_matches(partial_arg: &str) -> bool {
+        T::partial_matches(partial_arg)
+    }
+
+    fn from_arg(arg: &'a str, context: &C) -> Result<Self, Error> {
+        Ok(Box::new(T::from_arg(arg, context)?))
     }
 }
