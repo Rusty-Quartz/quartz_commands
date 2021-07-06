@@ -151,14 +151,14 @@ pub trait FromArgument<'a, C>: Sized {
 /// wrapper will match on `help`, and `h` prefixed by zero, one, or two hyphens.
 pub struct Help<'a> {
     /// The exact string the user typed.
-    pub verbatim: &'a str
+    pub verbatim: &'a str,
 }
 
 impl<'a> Help<'a> {
-    /// Shorthand for `vec!["-help".to_owned()]` to make suggestion handler bindings less cumbersome.
+    /// Returns the singleton `"-help"`.
     #[inline]
-    pub fn suggestions() -> Vec<String> {
-        vec!["-help".to_owned()]
+    pub fn suggestions() -> impl IntoIterator<Item = &'static str> {
+        Some("-help")
     }
 }
 
@@ -173,9 +173,9 @@ impl<'a, C> FromArgument<'a, C> for Help<'a> {
             1 => partial_arg == "-" || partial_arg == "h",
             _ => {
                 let stripped = if partial_arg.starts_with("--") {
-                    &partial_arg[2..]
+                    &partial_arg[2 ..]
                 } else if partial_arg.starts_with("-") {
-                    &partial_arg[1..]
+                    &partial_arg[1 ..]
                 } else {
                     partial_arg
                 };
@@ -185,20 +185,18 @@ impl<'a, C> FromArgument<'a, C> for Help<'a> {
     }
 
     fn from_arg(arg: &'a str, _context: &C) -> Result<Self, Error> {
-        Ok(Help {
-            verbatim: arg
-        })
+        Ok(Help { verbatim: arg })
     }
 }
 
 macro_rules! impl_from_arg_for_int {
     ($int:ty) => {
-        impl<'a, C> FromArgument<'a, C> for $int {
+        impl<C> FromArgument<'_, C> for $int {
             fn matches(arg: &str) -> bool {
                 arg.chars().all(|ch| ch.is_digit(10))
             }
 
-            fn from_arg(arg: &'a str, _ctx: &C) -> Result<Self, Error> {
+            fn from_arg(arg: &str, _ctx: &C) -> Result<Self, Error> {
                 arg.parse::<$int>().map_err(|e| e.to_string())
             }
         }
@@ -220,7 +218,7 @@ impl_from_arg_for_int!(isize);
 
 macro_rules! impl_from_arg_fo_float {
     ($float:ty, $full_regex:literal, $partial_regex:literal) => {
-        impl<'a, C> FromArgument<'a, C> for $float {
+        impl<C> FromArgument<'_, C> for $float {
             fn matches(arg: &str) -> bool {
                 lazy_static! {
                     static ref FULL: Regex = Regex::new($full_regex).unwrap();
@@ -241,7 +239,7 @@ macro_rules! impl_from_arg_fo_float {
                 PARTIAL.is_match(partial_arg)
             }
 
-            fn from_arg(arg: &'a str, _ctx: &C) -> Result<Self, Error> {
+            fn from_arg(arg: &str, _ctx: &C) -> Result<Self, Error> {
                 let suffix_index = arg
                     .char_indices()
                     .rev()
@@ -288,12 +286,12 @@ impl_from_arg_fo_float!(
     r"^(\d+\.|\.\d*|\d+)[dD]?"
 );
 
-impl<'a, C> FromArgument<'a, C> for String {
+impl<C> FromArgument<'_, C> for String {
     fn matches(_arg: &str) -> bool {
         true
     }
 
-    fn from_arg(arg: &'a str, _ctx: &C) -> Result<Self, Error> {
+    fn from_arg(arg: &str, _ctx: &C) -> Result<Self, Error> {
         if arg.len() < 2 {
             Ok(arg.to_owned())
         } else {
@@ -330,7 +328,7 @@ impl<'a, C> FromArgument<'a, C> for &'a str {
     }
 }
 
-impl<'a, C> FromArgument<'a, C> for bool {
+impl<C> FromArgument<'_, C> for bool {
     fn matches(arg: &str) -> bool {
         arg == "true" || arg == "false"
     }
@@ -351,7 +349,7 @@ impl<'a, C> FromArgument<'a, C> for bool {
     }
 }
 
-impl<'a, C> FromArgument<'a, C> for char {
+impl<C> FromArgument<'_, C> for char {
     fn matches(arg: &str) -> bool {
         arg.chars().count() == 1
     }
@@ -378,8 +376,7 @@ impl<'a, C> FromArgument<'a, C> for char {
 }
 
 impl<'a, C, T> FromArgument<'a, C> for Option<T>
-where
-    T: FromArgument<'a, C>,
+where T: FromArgument<'a, C>
 {
     fn matches(arg: &str) -> bool {
         T::matches(arg)
@@ -395,8 +392,7 @@ where
 }
 
 impl<'a, C, T> FromArgument<'a, C> for Box<T>
-where
-    T: FromArgument<'a, C>
+where T: FromArgument<'a, C>
 {
     fn matches(arg: &str) -> bool {
         T::matches(arg)

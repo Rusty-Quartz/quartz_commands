@@ -1,8 +1,12 @@
 use crate::{keyword, path_matches};
 use once_cell::unsync::OnceCell;
 use proc_macro2::{Span, TokenStream};
-use quote::{quote, IdentFragment, ToTokens, TokenStreamExt, format_ident};
-use std::{collections::hash_map::DefaultHasher, fmt::{self, Display, Formatter}, hash::{Hash, Hasher}};
+use quote::{format_ident, quote, IdentFragment, ToTokens, TokenStreamExt};
+use std::{
+    collections::hash_map::DefaultHasher,
+    fmt::{self, Display, Formatter},
+    hash::{Hash, Hasher},
+};
 use syn::{
     braced,
     bracketed,
@@ -16,13 +20,13 @@ use syn::{
     GenericParam,
     Ident,
     ItemType,
-    TypeReference,
     Lifetime,
     Lit,
     LitStr,
     Result,
     Token,
     Type,
+    TypeReference,
     Visibility,
 };
 
@@ -189,7 +193,7 @@ pub enum Node {
     Literal {
         lit: LitStrRef,
         as_token: Option<Token![as]>,
-        renamed: Option<StrIdent>
+        renamed: Option<StrIdent>,
     },
     CommandRoot(keyword::root),
     Any {
@@ -212,7 +216,7 @@ impl Node {
             Node::Argument { name, .. } => name.as_str(),
             Node::Literal { lit, renamed, .. } => match renamed {
                 Some(name) => name.as_str(),
-                None => lit.as_str()
+                None => lit.as_str(),
             },
             _ => panic!("Only `Argument` and `Literal` node types have names."),
         }
@@ -273,18 +277,19 @@ impl Parse for Node {
                 let ty = if greedy.is_some() {
                     let ty = input.parse()?;
                     let is_valid = match &ty {
-                        Type::Reference(TypeReference { elem, .. }) => {
-                            match &**elem {
-                                Type::Path(type_path) => path_matches(type_path, "str"),
-                                _ => false
-                            }
+                        Type::Reference(TypeReference { elem, .. }) => match &**elem {
+                            Type::Path(type_path) => path_matches(type_path, "str"),
+                            _ => false,
                         },
                         Type::Path(type_path) => path_matches(type_path, "String"),
-                        _ => false
+                        _ => false,
                     };
 
                     if !is_valid {
-                        return Err(Error::new(ty.span(), "Greedy arguments must be of type String or &str."));
+                        return Err(Error::new(
+                            ty.span(),
+                            "Greedy arguments must be of type String or &str.",
+                        ));
                     }
 
                     ty
@@ -339,7 +344,7 @@ impl Parse for Node {
                 Ok(Node::Literal {
                     lit,
                     as_token,
-                    renamed
+                    renamed,
                 })
             }
         } else {
@@ -361,7 +366,11 @@ impl ToTokens for Node {
             } => quote! {
                 #name #colon #greedy #ty #eq #default
             },
-            Node::Literal { lit, as_token, renamed } => quote! { #lit #as_token #renamed },
+            Node::Literal {
+                lit,
+                as_token,
+                renamed,
+            } => quote! { #lit #as_token #renamed },
             Node::CommandRoot(root) => quote! { #root },
             Node::Any { any, nodes } => quote! {
                 #any [ #nodes ]

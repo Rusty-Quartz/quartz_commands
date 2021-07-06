@@ -68,7 +68,7 @@ pub fn generate_module(input: CommandModule) -> TokenStream {
         let dispatch_func = ident_dispatch_node(command.name());
 
         quote! {
-            ::core::option::Option::Some(#( #str_aliases )|*) => Self::#dispatch_func(__args, __context, ::core::default::Default::default())
+            ::core::option::Option::Some(#( #str_aliases )|*) => Self::#dispatch_func(&mut __args, __context, ::core::default::Default::default())
         }
     });
     let suggest_arms = input.definitions
@@ -265,22 +265,20 @@ impl<'a> NodeGraph<'a> {
                     }
                     None => node_data_for_binding.executes = Some(handler_binding),
                 },
-                HandlerType::Suggester(_) => {
-                    match node_data_for_binding.suggests {
-                        Some(handler) => {
-                            handler_binding
-                                .span()
-                                .unwrap()
-                                .error("Multiple suggestion generators cannot be bound to a node")
-                                .span_note(
-                                    handler.span().unwrap(),
-                                    "Suggestion generator first bound here",
-                                )
-                                .emit();
-                            failed = true;
-                        }
-                        None => node_data_for_binding.suggests = Some(handler_binding),
+                HandlerType::Suggester(_) => match node_data_for_binding.suggests {
+                    Some(handler) => {
+                        handler_binding
+                            .span()
+                            .unwrap()
+                            .error("Multiple suggestion generators cannot be bound to a node")
+                            .span_note(
+                                handler.span().unwrap(),
+                                "Suggestion generator first bound here",
+                            )
+                            .emit();
+                        failed = true;
                     }
+                    None => node_data_for_binding.suggests = Some(handler_binding),
                 },
             }
         }
@@ -305,10 +303,14 @@ impl<'a> NodeGraph<'a> {
                 ..
             } => {
                 let (cached_greedy, cached_default) = match self.flat_graph.get(node.name()) {
-                    Some(NodeData { definition: Node::Argument { greedy, default, .. }, .. }) => {
-                        (greedy, default)
-                    },
-                    _ => (greedy, default)
+                    Some(NodeData {
+                        definition:
+                            Node::Argument {
+                                greedy, default, ..
+                            },
+                        ..
+                    }) => (greedy, default),
+                    _ => (greedy, default),
                 };
 
                 if cached_greedy.is_some() && successor.is_some() {
@@ -338,7 +340,7 @@ impl<'a> NodeGraph<'a> {
                         .unwrap()
                         .error(
                             "Cannot have non-default argument successors after a default argument \
-                            node",
+                             node",
                         )
                         .emit();
                     return false;
@@ -641,12 +643,12 @@ impl<'a> NodeGraph<'a> {
             },
         );
 
-        let node_dispatch_fn_names =
-            iter.clone()
-                .map(|(_, NodeData { definition, .. })| format_ident!("dispatch_{}_{}", name, definition.unique_ident()));
-        let node_suggestions_fn_names =
-            iter.clone()
-                .map(|(_, NodeData { definition, .. })| format_ident!("get_suggestions_{}_{}", name, definition.unique_ident()));
+        let node_dispatch_fn_names = iter.clone().map(|(_, NodeData { definition, .. })| {
+            format_ident!("dispatch_{}_{}", name, definition.unique_ident())
+        });
+        let node_suggestions_fn_names = iter.clone().map(|(_, NodeData { definition, .. })| {
+            format_ident!("get_suggestions_{}_{}", name, definition.unique_ident())
+        });
 
         let node_dispatch_fn_context_names =
             iter.clone()
@@ -670,7 +672,7 @@ impl<'a> NodeGraph<'a> {
         quote! {
             #(
                 fn #node_dispatch_fn_names<'cmd, #context_lifetime>(
-                    mut __args: ::quartz_commands::ArgumentTraverser<'cmd>,
+                    __args: &mut ::quartz_commands::ArgumentTraverser<'cmd>,
                     mut #node_dispatch_fn_context_names: #context_type,
                     mut __data: #data_mod_name::#data_struct_name<'cmd>
                 ) -> ::core::result::Result<(), ::quartz_commands::Error>
@@ -680,7 +682,7 @@ impl<'a> NodeGraph<'a> {
             )*
 
             fn #root_dispatch_fn<'cmd, #context_lifetime>(
-                mut __args: ::quartz_commands::ArgumentTraverser<'cmd>,
+                __args: &mut ::quartz_commands::ArgumentTraverser<'cmd>,
                 mut #root_dispatch_context_name: #context_type,
                 mut __data: #data_mod_name::#data_struct_name<'cmd>
             ) -> ::core::result::Result<(), ::quartz_commands::Error>
@@ -861,24 +863,27 @@ impl<'a> NodeGraph<'a> {
             .unwrap_or(format_ident!("__context"));
 
         let default_arm = match suggests {
-            Some(HandlerBinding { handler, .. }) => {
+            Some(HandlerBinding { handler, arg, .. }) => {
                 let unpack = self.gen_unpack_data_struct(root_name, data_mod_name, &[]);
                 Some(quote! {
                     {
                         #unpack
                         let __helper = move || { #handler };
-                        __suggestions.extend(__helper());
+                        __suggestions.extend(
+                            __helper()
+                                .into_iter()
+                                .filter(|__cmd| __cmd.starts_with(#arg))
+                                .map(::core::convert::Into::into)
+                        );
                     }
                 })
             }
             None => match definition {
-                Some(Node::Literal { lit, .. }) => {
-                    Some(quote! {
-                        if #lit.starts_with(__arg) {
-                            __suggestions.push(#lit.to_owned());
-                        }
-                    })
-                },
+                Some(Node::Literal { lit, .. }) => Some(quote! {
+                    if #lit.starts_with(__arg) {
+                        __suggestions.push(#lit.to_owned());
+                    }
+                }),
                 _ => None,
             },
         };
@@ -950,8 +955,20 @@ impl<'a> NodeGraph<'a> {
             (Node::Argument { name: name0, .. }, Node::Argument { name: name1, .. }) =>
                 name0 == name1,
             (Node::Literal { lit: lit0, .. }, Node::Literal { lit: lit1, .. }) => lit0 == lit1,
-            (Node::Argument { name: arg_name, .. }, Node::Literal { renamed: Some(lit_name), .. }) => arg_name == lit_name,
-            (Node::Literal { renamed: Some(lit_name), .. }, Node::Argument { name: arg_name, .. }) => lit_name == arg_name,
+            (
+                Node::Argument { name: arg_name, .. },
+                Node::Literal {
+                    renamed: Some(lit_name),
+                    ..
+                },
+            ) => arg_name == lit_name,
+            (
+                Node::Literal {
+                    renamed: Some(lit_name),
+                    ..
+                },
+                Node::Argument { name: arg_name, .. },
+            ) => lit_name == arg_name,
             (Node::CommandRoot(_), Node::CommandRoot(_)) => true,
             _ => false,
         }
