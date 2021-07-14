@@ -1,4 +1,4 @@
-use quartz_commands::{module, FromArgument};
+use quartz_commands::module;
 
 module! {
     // The generated struct name will be `Simple`
@@ -7,12 +7,16 @@ module! {
     // This field is required. If it has a lifetime, the lifetime must be named 'ctx
     type Context<'ctx> = &'ctx mut u32;
 
+    // Declare a new command named `add`
     command add
-    where
-        additional: u32,
+
+    // Define the arguments it takes, and how certain arguments "lead" into other arguments
+    where additional: u32,
+
+    // Define the command logic
     {
         additional executes |ctx| {
-            // Additional is in-scope since it is guaranteed to be well defined if we
+            // `additional` is in-scope since it is guaranteed to be well defined if we
             // made it to this branch.
             let result = *ctx + additional;
 
@@ -42,11 +46,4 @@ fn main() {
     let mut x: u32 = 5;
     assert!((Simple).dispatch("add 10", &mut x).is_ok());
     assert_eq!(x, 15);
-}
-
-#[derive(FromArgument)]
-enum Test {
-    VariantA,
-    VariantB,
-    AMuchLargerStringOfWordsForTesting
 }

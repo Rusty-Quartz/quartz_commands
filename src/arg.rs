@@ -189,7 +189,7 @@ impl<'a, C> FromArgument<'a, C> for Help<'a> {
     }
 }
 
-macro_rules! impl_from_arg_for_int {
+macro_rules! impl_from_arg_for_uint {
     ($int:ty) => {
         impl<C> FromArgument<'_, C> for $int {
             fn matches(arg: &str) -> bool {
@@ -203,17 +203,39 @@ macro_rules! impl_from_arg_for_int {
     };
 }
 
-impl_from_arg_for_int!(u8);
+macro_rules! impl_from_arg_for_int {
+    ($int:ty) => {
+        impl<C> FromArgument<'_, C> for $int {
+            fn matches(arg: &str) -> bool {
+                let mut chars = arg.chars().peekable();
+                match chars.peek() {
+                    Some('+' | '-') => {
+                        chars.next();
+                    }
+                    Some(_) => {}
+                    None => return true,
+                };
+                arg.chars().all(|ch| ch.is_digit(10))
+            }
+
+            fn from_arg(arg: &str, _ctx: &C) -> Result<Self, Error> {
+                arg.parse::<$int>().map_err(|e| e.to_string())
+            }
+        }
+    };
+}
+
+impl_from_arg_for_uint!(u8);
+impl_from_arg_for_uint!(u16);
+impl_from_arg_for_uint!(u32);
+impl_from_arg_for_uint!(u64);
+impl_from_arg_for_uint!(u128);
+impl_from_arg_for_uint!(usize);
 impl_from_arg_for_int!(i8);
-impl_from_arg_for_int!(u16);
 impl_from_arg_for_int!(i16);
-impl_from_arg_for_int!(u32);
 impl_from_arg_for_int!(i32);
-impl_from_arg_for_int!(u64);
 impl_from_arg_for_int!(i64);
-impl_from_arg_for_int!(u128);
 impl_from_arg_for_int!(i128);
-impl_from_arg_for_int!(usize);
 impl_from_arg_for_int!(isize);
 
 macro_rules! impl_from_arg_fo_float {

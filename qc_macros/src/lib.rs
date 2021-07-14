@@ -18,7 +18,10 @@ use quote::quote;
 #[proc_macro]
 pub fn module(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let module = parse_macro_input!(item as parse::CommandModule);
-    gen::generate_module(module).into()
+    match gen::generate_module(module) {
+        Some(output) => output.into(),
+        None => proc_macro::TokenStream::new()
+    }
 }
 
 /// Derives the trait FromArgument for enums whose variants are field-less.
