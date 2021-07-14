@@ -1,7 +1,7 @@
 use crate::parse::{Command, CommandModule, HandlerBinding, HandlerType, Node, NodeRef, StrIdent};
 use proc_macro2::{Literal, TokenStream};
 use quote::{format_ident, quote, ToTokens};
-use std::{cell::RefCell, cmp::Ordering, collections::HashMap};
+use std::{cell::{Cell, RefCell}, cmp::Ordering, collections::HashMap};
 use syn::{spanned::Spanned, Ident, Lifetime, Type};
 
 // Generates a struct and module of data structs which implement the supplied command
@@ -223,7 +223,7 @@ impl<'a> NodeGraph<'a> {
                         // If this node is already registered as a root successor, then just ignore
                         // it, duplicates are handled later.
                         if graph.root_successors.iter().any(|&root_successor| {
-                            Self::node_name_eq(candidate_root_successor, root_successor)
+                            node_name_eq(candidate_root_successor, root_successor)
                         }) {
                             continue;
                         }
@@ -257,16 +257,6 @@ impl<'a> NodeGraph<'a> {
 
         if failed {
             return None;
-        }
-
-        // Since all the successors resolved successfully, we can now track predecessors without
-        // any checks. This computation has to be done after the successors so that the check
-        // for duplicate nodes in the `resolve_successor` function works correctly.
-        for node_data in graph.flat_graph.values() {
-            for &successor in &node_data.successors {
-                let succ_data = graph.flat_graph.get(&successor.unique_name()).unwrap();
-                succ_data.predecessors.borrow_mut().push(node_data.definition);
-            }
         }
 
         // Apply the handler bindings
@@ -544,7 +534,7 @@ impl<'a> NodeGraph<'a> {
                     let successor0 = node_data.successors[i];
                     let successor1 = node_data.successors[j];
 
-                    if Self::node_name_eq(successor0, successor1) {
+                    if node_name_eq(successor0, successor1) {
                         successor1
                             .span()
                             .unwrap()
@@ -566,92 +556,49 @@ impl<'a> NodeGraph<'a> {
     /// Track which arguments have defined defined values by endowing their successors with that
     /// information.
     fn track_defined_args(&mut self) {
-        for (_, node_data) in self.flat_graph.iter() {
-            let mut stack = vec![node_data.definition];
-            self.add_arg_to_successors(node_data.definition, &node_data.successors, &mut stack);
+        for &node in self.root_successors.iter() {
+            self.resolve_defined_args(node, Vec::new());
         }
     }
 
-    /// Tells the given list of successors that their given predecessor has a well-defined value.
-    fn add_arg_to_successors(&self, arg_node: &'a Node, successors: &[&'a Node], stack: &mut Vec<&'a Node>) {
-        // We allow arguments and literals in case any literals lead into more arguments. An
-        // example may be the branch `a: i32 => "b" => c: i32`. We want to make sure `a` is
-        // defined for `c`.
-        for &successor in successors
-            .into_iter()
-            .filter(|&&successor| matches!(successor, Node::Argument { .. } | Node::Literal { .. }))
-        {
-            let succ_data = self.flat_graph.get(&successor.unique_name()).unwrap();
-
-            // Prevent infinite loops
-            if stack.iter().copied().any(|node| Self::node_name_eq(node, succ_data.definition)) {
-                continue;
-            }
-
-            // We only need to track non-default argument nodes
-            if matches!(arg_node, Node::Argument { default: None, .. }) {
-                let arg_data = self.flat_graph.get(&arg_node.unique_name()).unwrap();
-
-                let mut succ_defined_args = succ_data
-                    .defined_arguments
-                    .borrow_mut();
-                
-                // Guaranteed to contain `arg_node`
-                let mut defined_arguments = arg_data.defined_arguments.borrow().clone();
-
-                // We can only be sure a node is defined if all predecessors of a successor agree
-                // that it's defined.
-                for &predecessor in &*succ_data.predecessors.borrow() {
-                    // Ignore the predecessor we already know about
-                    if Self::node_name_eq(arg_node, predecessor) {
-                        continue;
-                    }
-
-                    // If no defined arguments are left we can exit early
-                    if defined_arguments.is_empty() {
-                        break;
-                    }
-
-                    // Grab the args that the predecessor knows are defined
-                    let predecessor_defined_args = self
-                        .flat_graph
-                        .get(&predecessor.unique_name())
-                        .unwrap()
-                        .defined_arguments
-                        .borrow();
-
-                    // Remove the arguments that the predecessor disagrees about
-                    let mut i = 0;
-                    while i < defined_arguments.len() {
-                        let cur_arg = defined_arguments[i];
-                        if !predecessor_defined_args.iter().any(|&node| Self::node_name_eq(node, cur_arg)) {
-                            defined_arguments.remove(i);
-                        } else {
-                            i += 1;
-                        }
-                    }
-                }
-
-                for defined_arg in defined_arguments {
-                    // Make sure we don't add any duplicates
-                    if !succ_defined_args.iter().any(|&node| Self::node_name_eq(node, defined_arg)) {
-                        succ_defined_args.push(defined_arg);
-                    }
-                }
-            }
-
-            // Keep track of where we've visited
-            stack.push(succ_data.definition);
-
-            // Propagate the successor definitions
-            self.add_arg_to_successors(
-                successor,
-                &succ_data.successors,
-                stack
-            );
-
-            let _ = stack.pop();
+    /// Attempt to resolve which arguments have a defined value for the given node.
+    fn resolve_defined_args(
+        &self,
+        node: &'a Node,
+        mut stack: Vec<&'a Node>,
+    ) {
+        // The only other option is the root, which is considered to have no arguments defined
+        if !matches!(node, Node::Argument { .. } | Node::Literal { .. }) {
+            return;
         }
+
+        // We've detected a cycle and therefore can exit
+        if stack.iter().any(|&stack_node| node_name_eq(node, stack_node)) {
+            return;
+        }
+
+        // This node is now considered defined since we're visiting it, but we only keep track of
+        // non-default argument nodes
+        if matches!(node, Node::Argument { default: None, .. }) {
+            stack.push(node);
+        }
+
+        // Update the defined arguments with the current stack, see `update` for details
+        let node_data = self.flat_graph.get(&node.unique_name()).unwrap();
+        node_data.defined_arguments.update(&stack);
+
+        // No successors means we're done
+        if node_data.successors.is_empty() {
+            return;
+        }
+
+        // We only need to copy the stack if there are more than one successor
+        for &successor in node_data.successors.iter().take(node_data.successors.len() - 1) {
+            self.resolve_defined_args(successor, stack.clone());
+        }
+
+        // Unwrap guaranteed to work because of the check for an empty successor list
+        self.resolve_defined_args(node_data.successors.last().unwrap(), stack);
     }
 
     /// Generates a struct for all the arguments in a given command. All non-default arguments
@@ -731,7 +678,7 @@ impl<'a> NodeGraph<'a> {
             .iter()
             .filter(|(_, data)| matches!(data.definition, Node::Argument { default: None, .. }))
             .map(|(name, data)| (name, data.definition))
-            .filter(|&(_, node)| defined_args.into_iter().any(|defined_node| Self::node_name_eq(node, defined_node)))
+            .filter(|&(_, node)| defined_args.into_iter().any(|defined_node| node_name_eq(node, defined_node)))
             .map(|(str_name, _)| format_ident!("{}", str_name))
             .collect::<Vec<_>>();
 
@@ -798,7 +745,7 @@ impl<'a> NodeGraph<'a> {
                 definition,
                 *executes,
                 successors,
-                &*defined_arguments.borrow(),
+                &*defined_arguments.args.borrow(),
             )?);
         }
         let mut node_suggestions_fn_matches = Vec::with_capacity(self.flat_graph.len());
@@ -1177,31 +1124,6 @@ impl<'a> NodeGraph<'a> {
             }
         }
     }
-
-    /// Returns whether or not the two nodes share the same name in a way that would cause a name conflict.
-    fn node_name_eq(a: &Node, b: &Node) -> bool {
-        match &(a, b) {
-            (Node::Argument { name: name0, .. }, Node::Argument { name: name1, .. }) =>
-                name0 == name1,
-            (Node::Literal { lit: lit0, .. }, Node::Literal { lit: lit1, .. }) => lit0 == lit1,
-            (
-                Node::Argument { name: arg_name, .. },
-                Node::Literal {
-                    renamed: Some(lit_name),
-                    ..
-                },
-            ) => arg_name == lit_name,
-            (
-                Node::Literal {
-                    renamed: Some(lit_name),
-                    ..
-                },
-                Node::Argument { name: arg_name, .. },
-            ) => lit_name == arg_name,
-            (Node::CommandRoot(_), Node::CommandRoot(_)) => true,
-            _ => false,
-        }
-    }
 }
 
 struct NodeData<'a> {
@@ -1209,25 +1131,56 @@ struct NodeData<'a> {
     executes: Option<&'a HandlerBinding>,
     suggests: Option<&'a HandlerBinding>,
     successors: Vec<&'a Node>,
-    predecessors: RefCell<Vec<&'a Node>>,
-    defined_arguments: RefCell<Vec<&'a Node>>,
+    defined_arguments: DefinedArguments<'a>,
 }
 
 impl<'a> NodeData<'a> {
     pub fn with_successors(definition: &'a Node, successors: Vec<&'a Node>) -> Self {
-        let defined_args = if matches!(definition, Node::Argument { default: None, .. }) {
-            vec![definition]
-        } else {
-            Vec::new()
-        };
-
         NodeData {
             definition,
             executes: None,
             suggests: None,
             successors,
-            predecessors: RefCell::new(Vec::new()),
-            defined_arguments: RefCell::new(defined_args),
+            defined_arguments: DefinedArguments::new(),
+        }
+    }
+}
+
+/// When traversing the graph, we need to differentiate first visits from subsequent visits while
+/// also keeping track of the implied defined arguments for every non-default argument node. We
+/// use this struct to help out with that process, and make it interiorly-mutable for convenience.
+struct DefinedArguments<'a> {
+    args: RefCell<Vec<&'a Node>>,
+    initialized: Cell<bool>
+}
+
+impl<'a> DefinedArguments<'a> {
+    const fn new() -> Self {
+        DefinedArguments {
+            args: RefCell::new(Vec::new()),
+            initialized: Cell::new(false)
+        }
+    }
+
+    // Update which arguments we considered well-defined based on the given set of arguments
+    // defined for a certain path. If the `initialized` field is false, then we adopt the entire set
+    // of provided arguments and consider them to be defined. If this node was already initialized,
+    // then we take the intersection of the current defined arguments with the provided defined
+    // arguments.
+    fn update(&self, defined_args: &[&'a Node]) {
+        if self.initialized.replace(true) {
+            let mut args = self.args.borrow_mut();
+            let mut i = 0;
+            while i < args.len() {
+                let cur_arg = args[i];
+                if !defined_args.iter().any(|&arg| node_name_eq(arg, cur_arg)) {
+                    args.remove(i);
+                } else {
+                    i += 1;
+                }
+            }
+        } else {
+            self.args.borrow_mut().extend(defined_args.into_iter().copied());
         }
     }
 }
@@ -1242,4 +1195,29 @@ fn ident_get_suggestions_node<T: quote::IdentFragment>(name: &T) -> Ident {
 
 fn ident_data_struct<T: quote::IdentFragment>(name: &T) -> Ident {
     format_ident!("CommandData{}", name)
+}
+
+/// Returns whether or not the two nodes share the same name in a way that would cause a name conflict.
+fn node_name_eq(a: &Node, b: &Node) -> bool {
+    match &(a, b) {
+        (Node::Argument { name: name0, .. }, Node::Argument { name: name1, .. }) =>
+            name0 == name1,
+        (Node::Literal { lit: lit0, .. }, Node::Literal { lit: lit1, .. }) => lit0 == lit1,
+        (
+            Node::Argument { name: arg_name, .. },
+            Node::Literal {
+                renamed: Some(lit_name),
+                ..
+            },
+        ) => arg_name == lit_name,
+        (
+            Node::Literal {
+                renamed: Some(lit_name),
+                ..
+            },
+            Node::Argument { name: arg_name, .. },
+        ) => lit_name == arg_name,
+        (Node::CommandRoot(_), Node::CommandRoot(_)) => true,
+        _ => false,
+    }
 }
