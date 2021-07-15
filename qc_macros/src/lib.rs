@@ -14,7 +14,7 @@ use syn::{DeriveInput, TypePath, parse_macro_input, Data, Error, Fields};
 use proc_macro2::Literal;
 use quote::quote;
 
-/// Parses Quartz's custom command syntax and generates a command module.
+#[allow(missing_docs)]
 #[proc_macro]
 pub fn module(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let module = parse_macro_input!(item as parse::CommandModule);
@@ -24,7 +24,7 @@ pub fn module(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
     }
 }
 
-/// Derives the trait FromArgument for enums whose variants are field-less.
+#[allow(missing_docs)]
 #[proc_macro_derive(FromArgument)]
 pub fn derive_from_argument(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(item as DeriveInput);

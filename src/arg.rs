@@ -147,8 +147,8 @@ pub trait FromArgument<'a, C>: Sized {
     fn from_arg(arg: &'a str, context: &C) -> Result<Self, Error>;
 }
 
-/// A wrapper around arguments which could be interpreted as the user ask for help with a command. This
-/// wrapper will match on `help`, and `h` prefixed by zero, one, or two hyphens.
+/// A wrapper around arguments which could be interpreted as the user asking for help with a
+/// command. This wrapper will match on `help`, and `h` prefixed by zero, one, or two hyphens.
 pub struct Help<'a> {
     /// The exact string the user typed.
     pub verbatim: &'a str,

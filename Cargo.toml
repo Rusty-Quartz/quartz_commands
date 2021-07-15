@@ -1,8 +1,16 @@
 [package]
 name = "quartz_commands"
-version = "0.1.1"
+version = "0.1.0"
 authors = ["Cassy343", "maddymakesgames"]
 edition = "2018"
+
+description = "Generates a parser at compile-time for handling commands similar in structure to those of Minecraft."
+repository = "https://github.com/Rusty-Quartz/quartz_commands"
+license = "MIT"
+readme = "README.md"
+
+keywords = ["command", "parse", "cli", "minecraft"]
+categories = ["command-line-interface", "text-processing", "compilers", "parser-implementations"]
 
 [dependencies]
 lazy_static = "1.4.0"

@@ -187,6 +187,7 @@ pub fn generate_module(input: CommandModule) -> Option<TokenStream> {
 // into a flattened graph of nodes paired with their successors.
 struct NodeGraph<'a> {
     flat_graph: HashMap<String, NodeData<'a>>,
+    named_any_nodes: HashMap<String, &'a Node>,
     root_executes: Option<&'a HandlerBinding>,
     root_suggests: Option<&'a HandlerBinding>,
     root_successors: Vec<&'a Node>,
@@ -199,6 +200,7 @@ impl<'a> NodeGraph<'a> {
         // Initialize the graph
         let mut graph = NodeGraph {
             flat_graph: HashMap::new(),
+            named_any_nodes: HashMap::new(),
             root_executes: None,
             root_suggests: None,
             root_successors: Vec::new(),
@@ -247,10 +249,20 @@ impl<'a> NodeGraph<'a> {
             // regarding argument nodes.
             for i in 0 .. branch.nodes.len() {
                 let node = &branch.nodes[i];
-                let successor = branch.nodes.get(i + 1);
 
-                if !graph.resolve_successor(node, successor) {
-                    failed = true;
+                if let Node::Any { name: Some(name), .. } = node {
+                    graph.named_any_nodes.insert(name.to_string(), node);
+                }
+
+                let node = graph.node_definition(node);
+                let successor = branch.nodes.get(i + 1)
+                    // FIXME: this map causes a segfault when running `cargo expand --example simple`
+                    .map(|node| graph.node_definition(node));
+
+                for node in node.flatten() {
+                    if !graph.resolve_successor(graph.node_definition(node), successor) {
+                        failed = true;
+                    }
                 }
             }
         }
@@ -367,9 +379,33 @@ impl<'a> NodeGraph<'a> {
         }
     }
 
+    fn node_definition(&self, node: &'a Node) -> &'a Node {
+        match node {
+            Node::CommandRoot(_) => node,
+            Node::Any { .. } => node,
+            Node::Argument { ty: Some(_), .. } => node,
+            Node::Literal { .. } => node,
+            _ => {
+                match self.flat_graph.get(&node.unique_name()).map(|data| data.definition) {
+                    Some(node_defn) => return node_defn,
+                    None => {}
+                }
+
+                match self.named_any_nodes.get(&node.unique_name()) {
+                    Some(any_node) => any_node,
+                    None => node
+                }
+            }
+        }
+    }
+
     fn resolve_successor(&mut self, node: &'a Node, successor: Option<&'a Node>) -> bool {
         // Flatten a potential `Any` node
-        let successors = successor.into_iter().flat_map(Node::flatten);
+        let successors = successor
+            .into_iter()
+            .flat_map(Node::flatten)
+            .map(|node| self.node_definition(node))
+            .collect::<Vec<_>>();
 
         match node {
             Node::Argument {
@@ -468,7 +504,7 @@ impl<'a> NodeGraph<'a> {
 
                         self.flat_graph.insert(
                             unique_name,
-                            NodeData::with_successors(node, successors.collect()),
+                            NodeData::with_successors(node, successors),
                         );
                     }
                 }
@@ -487,7 +523,7 @@ impl<'a> NodeGraph<'a> {
                     None => {
                         self.flat_graph.insert(
                             unique_name,
-                            NodeData::with_successors(node, successors.collect()),
+                            NodeData::with_successors(node, successors),
                         );
                     }
                 }

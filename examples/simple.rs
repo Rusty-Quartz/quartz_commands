@@ -37,6 +37,12 @@ module! {
             ["10", "20"].iter().copied()
         };
     }
+
+    command test
+    where any a_or_b ["a", "b"] => "thing" => a_or_b
+    {
+        "thing" executes |_ctx| Ok(());
+    }
 }
 
 fn main() {

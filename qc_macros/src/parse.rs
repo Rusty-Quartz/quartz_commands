@@ -247,6 +247,7 @@ pub enum Node {
     /// be flattened out into its elements during generation.
     Any {
         any: keyword::any,
+        name: Option<StrIdent>,
         nodes: Punctuated<Self, Token![,]>,
     },
 }
@@ -296,6 +297,12 @@ impl Parse for Node {
         else if lookahead.peek(keyword::any) {
             let any: keyword::any = input.parse()?;
 
+            let name = if input.peek(Ident) {
+                Some(input.parse()?)
+            } else {
+                None
+            };
+
             // Grab the content between the square brackets
             let content;
             let bracket = bracketed!(content in input);
@@ -321,7 +328,7 @@ impl Parse for Node {
                     }
                 }
 
-                Ok(Node::Any { any, nodes })
+                Ok(Node::Any { any, name, nodes })
             }
         }
         // Any other identifier signals the start of an argument node
@@ -449,8 +456,8 @@ impl ToTokens for Node {
                 renamed,
             } => quote! { #lit #as_token #renamed },
             Node::CommandRoot(root) => quote! { #root },
-            Node::Any { any, nodes } => quote! {
-                #any [ #nodes ]
+            Node::Any { any, name, nodes } => quote! {
+                #any #name [ #nodes ]
             },
         };
         tokens.append_all(tks);
