@@ -15,7 +15,7 @@ categories = ["command-line-interface", "text-processing", "compilers", "parser-
 [dependencies]
 lazy_static = "1.4"
 regex = "1.5"
-quartz_commands_macros = { version = "0.1.0", path = "./macros" }
+quartz_commands_macros = "0.1.0"
 
 [[example]]
 name = "simple"
