@@ -4,6 +4,11 @@ Generates a parser at compile-time for handling commands similar in structure to
 Using a custom-designed syntax, one can efficiently specify the format of a number of commands
 within our `module!` macro.
 
+This crate is the standalone command handler for [Quartz](https://github.com/Rusty-Quartz/Quartz),
+a Minecraft server implementation in Rust.
+
+For a real-world example, see Quartz's [proxy](https://github.com/Rusty-Quartz/quartz_proxy).
+
 # Usage
 
 Use the most recent version of this crate when adding it to your dependencies as shown below.
