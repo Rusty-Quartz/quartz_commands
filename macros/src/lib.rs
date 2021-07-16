@@ -1,8 +1,8 @@
 #![warn(missing_docs)]
 #![feature(proc_macro_diagnostic)]
 
-//! This crate contains the function-like procedural macro which parses the custom command syntax
-//! and converts it into viable rust code.
+//! This crate contains the function-like procedural macro which parses
+//! [`quartz_commands`](https://docs.rs/quartz_commands)'s custom syntax.
 
 extern crate proc_macro;
 
@@ -64,7 +64,7 @@ pub fn derive_from_argument(item: proc_macro::TokenStream) -> proc_macro::TokenS
 
     // Since all the variants are field-less, we don't need to worry about copying over generics.
     (quote! {
-        impl<C> ::quartz_commands::FromArgument<'_, C> for #ident {
+        impl<'a, C> ::quartz_commands::FromArgument<'a, C> for #ident {
             fn matches(arg: &str) -> bool {
                 [#( #arg_literals ),*].iter().any(|&lit| arg == lit)
             }
@@ -73,7 +73,7 @@ pub fn derive_from_argument(item: proc_macro::TokenStream) -> proc_macro::TokenS
                 [#( #arg_literals ),*].iter().any(|lit| lit.starts_with(partial_arg))
             }
 
-            fn from_arg(arg: &str, _context: &C) -> Result<Self, ::quartz_commands::Error> {
+            fn from_arg(arg: &'a str, _args: &mut ArgumentTraverser<'a>, _context: &C) -> Result<Self, ::quartz_commands::Error> {
                 match arg {
                     #( #match_arms, )*
                     _ => ::core::result::Result::Err(format!("\"{}\" does not match any variant in enum {}", arg, #ident_str))

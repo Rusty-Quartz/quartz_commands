@@ -28,6 +28,8 @@ impl<'cmd> ArgumentTraverser<'cmd> {
     /// Returns the remaining portion of the string being traversed, including the argument which
     /// was last read.
     pub fn gobble_remaining(&mut self) -> &'cmd str {
+        // Note that it's important that we only modify the index here. This function should not
+        // modify the anchor.
         self.index = self.command.len();
         &self.command[self.anchor ..]
     }
@@ -58,6 +60,8 @@ impl<'cmd> ArgumentTraverser<'cmd> {
     }
 
     /// Returns the next argument in the string being traversed, or `None` if no arguments remain.
+    /// This function will not strip strings of any enclosing quotes, and will not resolve escape
+    /// sequences.
     pub fn next(&mut self) -> Option<&'cmd str> {
         if self.index >= self.command.len() {
             return None;
@@ -119,6 +123,12 @@ impl<'cmd> ArgumentTraverser<'cmd> {
             self.chars.next();
         }
     }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn __anchor(&self) -> usize {
+        self.anchor
+    }
 }
 
 /// Trait for matching and converting string arguments to concrete types. Any type which implements this
@@ -128,7 +138,8 @@ pub trait FromArgument<'a, C>: Sized {
     /// not imply that [`from_arg`](crate::arg::FromArgument::from_arg) will succeed, but it does
     /// imply that the argument could succeed given the correct context. In other words, this function
     /// should return true for any input that is in the set of all possible string representations
-    /// of `Self` given all possible contexts.
+    /// of `Self` given all possible contexts. If `Self` is represented by multiple arguments, then
+    /// this function should return true if the first of those arguments is valid.
     fn matches(arg: &str) -> bool;
 
     /// This function follows similar rules to [`matches`](crate::arg::FromArgument::matches), however
@@ -142,9 +153,13 @@ pub trait FromArgument<'a, C>: Sized {
     }
 
     /// Parses the given argument given a context. This function should only fail if it is impossible
-    /// to construct a valid `Self` from the given string and context. Any logical checks should be
-    /// performed in execution blocks.
-    fn from_arg(arg: &'a str, context: &C) -> Result<Self, Error>;
+    /// to construct a valid `Self` from the given string, traverser, and context. Any logical checks
+    /// should be performed in execution blocks.
+    ///
+    /// Note that it is not recommended to grab additional arguments from the given traverser. If the
+    /// traverser is advanced, then suggestion generation will stop after this argument is visited.
+    fn from_arg(arg: &'a str, args: &mut ArgumentTraverser<'a>, context: &C)
+        -> Result<Self, Error>;
 }
 
 /// A wrapper around arguments which could be interpreted as the user asking for help with a
@@ -184,19 +199,27 @@ impl<'a, C> FromArgument<'a, C> for Help<'a> {
         }
     }
 
-    fn from_arg(arg: &'a str, _context: &C) -> Result<Self, Error> {
+    fn from_arg(
+        arg: &'a str,
+        _args: &mut ArgumentTraverser<'a>,
+        _context: &C,
+    ) -> Result<Self, Error> {
         Ok(Help { verbatim: arg })
     }
 }
 
 macro_rules! impl_from_arg_for_uint {
     ($int:ty) => {
-        impl<C> FromArgument<'_, C> for $int {
+        impl<'a, C> FromArgument<'a, C> for $int {
             fn matches(arg: &str) -> bool {
                 arg.chars().all(|ch| ch.is_digit(10))
             }
 
-            fn from_arg(arg: &str, _ctx: &C) -> Result<Self, Error> {
+            fn from_arg(
+                arg: &'a str,
+                _args: &mut ArgumentTraverser<'a>,
+                _ctx: &C,
+            ) -> Result<Self, Error> {
                 arg.parse::<$int>().map_err(|e| e.to_string())
             }
         }
@@ -205,7 +228,7 @@ macro_rules! impl_from_arg_for_uint {
 
 macro_rules! impl_from_arg_for_int {
     ($int:ty) => {
-        impl<C> FromArgument<'_, C> for $int {
+        impl<'a, C> FromArgument<'a, C> for $int {
             fn matches(arg: &str) -> bool {
                 let mut chars = arg.chars().peekable();
                 match chars.peek() {
@@ -218,7 +241,11 @@ macro_rules! impl_from_arg_for_int {
                 arg.chars().all(|ch| ch.is_digit(10))
             }
 
-            fn from_arg(arg: &str, _ctx: &C) -> Result<Self, Error> {
+            fn from_arg(
+                arg: &'a str,
+                _args: &mut ArgumentTraverser<'a>,
+                _ctx: &C,
+            ) -> Result<Self, Error> {
                 arg.parse::<$int>().map_err(|e| e.to_string())
             }
         }
@@ -240,7 +267,7 @@ impl_from_arg_for_int!(isize);
 
 macro_rules! impl_from_arg_fo_float {
     ($float:ty, $full_regex:literal, $partial_regex:literal) => {
-        impl<C> FromArgument<'_, C> for $float {
+        impl<'a, C> FromArgument<'a, C> for $float {
             fn matches(arg: &str) -> bool {
                 lazy_static! {
                     static ref FULL: Regex = Regex::new($full_regex).unwrap();
@@ -261,7 +288,11 @@ macro_rules! impl_from_arg_fo_float {
                 PARTIAL.is_match(partial_arg)
             }
 
-            fn from_arg(arg: &str, _ctx: &C) -> Result<Self, Error> {
+            fn from_arg(
+                arg: &'a str,
+                _args: &mut ArgumentTraverser<'a>,
+                _ctx: &C,
+            ) -> Result<Self, Error> {
                 let suffix_index = arg
                     .char_indices()
                     .rev()
@@ -308,12 +339,12 @@ impl_from_arg_fo_float!(
     r"^(\d+\.|\.\d*|\d+)[dD]?"
 );
 
-impl<C> FromArgument<'_, C> for String {
+impl<'a, C> FromArgument<'a, C> for String {
     fn matches(_arg: &str) -> bool {
         true
     }
 
-    fn from_arg(arg: &str, _ctx: &C) -> Result<Self, Error> {
+    fn from_arg(arg: &'a str, _args: &mut ArgumentTraverser<'a>, _ctx: &C) -> Result<Self, Error> {
         if arg.len() < 2 {
             Ok(arg.to_owned())
         } else {
@@ -334,7 +365,7 @@ impl<'a, C> FromArgument<'a, C> for &'a str {
         true
     }
 
-    fn from_arg(arg: &'a str, _ctx: &C) -> Result<Self, Error> {
+    fn from_arg(arg: &'a str, _args: &mut ArgumentTraverser<'a>, _ctx: &C) -> Result<Self, Error> {
         if arg.len() < 2 {
             Ok(arg)
         } else {
@@ -350,7 +381,7 @@ impl<'a, C> FromArgument<'a, C> for &'a str {
     }
 }
 
-impl<C> FromArgument<'_, C> for bool {
+impl<'a, C> FromArgument<'a, C> for bool {
     fn matches(arg: &str) -> bool {
         arg == "true" || arg == "false"
     }
@@ -359,7 +390,7 @@ impl<C> FromArgument<'_, C> for bool {
         "true".starts_with(partial_arg) || "false".starts_with(partial_arg)
     }
 
-    fn from_arg(arg: &str, _ctx: &C) -> Result<Self, Error> {
+    fn from_arg(arg: &'a str, _args: &mut ArgumentTraverser<'a>, _ctx: &C) -> Result<Self, Error> {
         match arg {
             "true" => Ok(true),
             "false" => Ok(false),
@@ -371,7 +402,7 @@ impl<C> FromArgument<'_, C> for bool {
     }
 }
 
-impl<C> FromArgument<'_, C> for char {
+impl<'a, C> FromArgument<'a, C> for char {
     fn matches(arg: &str) -> bool {
         arg.chars().count() == 1
     }
@@ -380,7 +411,7 @@ impl<C> FromArgument<'_, C> for char {
         partial_arg.chars().count() <= 1
     }
 
-    fn from_arg(arg: &str, _ctx: &C) -> Result<Self, Error> {
+    fn from_arg(arg: &'a str, _args: &mut ArgumentTraverser<'a>, _ctx: &C) -> Result<Self, Error> {
         if arg.is_empty() {
             Err("Cannot parse an empty argument into a character".to_owned())
         } else {
@@ -408,8 +439,12 @@ where T: FromArgument<'a, C>
         T::partial_matches(partial_arg)
     }
 
-    fn from_arg(arg: &'a str, context: &C) -> Result<Self, Error> {
-        Ok(Some(T::from_arg(arg, context)?))
+    fn from_arg(
+        arg: &'a str,
+        args: &mut ArgumentTraverser<'a>,
+        context: &C,
+    ) -> Result<Self, Error> {
+        Ok(Some(T::from_arg(arg, args, context)?))
     }
 }
 
@@ -424,7 +459,11 @@ where T: FromArgument<'a, C>
         T::partial_matches(partial_arg)
     }
 
-    fn from_arg(arg: &'a str, context: &C) -> Result<Self, Error> {
-        Ok(Box::new(T::from_arg(arg, context)?))
+    fn from_arg(
+        arg: &'a str,
+        args: &mut ArgumentTraverser<'a>,
+        context: &C,
+    ) -> Result<Self, Error> {
+        Ok(Box::new(T::from_arg(arg, args, context)?))
     }
 }

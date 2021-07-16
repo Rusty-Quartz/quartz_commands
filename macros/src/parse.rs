@@ -587,14 +587,20 @@ impl Parse for HandlerBinding {
         let node_ref = input.parse()?;
 
         match &node_ref {
-            Node::Argument { colon: Some(_), .. } | Node::Argument { transient: Some(_), .. } =>
+            Node::Argument { colon: Some(_), .. }
+            | Node::Argument {
+                transient: Some(_), ..
+            } =>
                 return Err(Error::new_spanned(
                     node_ref,
                     "Argument node definition not allowed here",
                 )),
             Node::Literal {
                 as_token: Some(_), ..
-            } | Node::Literal { transient: Some(_), .. } =>
+            }
+            | Node::Literal {
+                transient: Some(_), ..
+            } =>
                 return Err(Error::new_spanned(
                     node_ref,
                     "Literal renaming not allowed here",

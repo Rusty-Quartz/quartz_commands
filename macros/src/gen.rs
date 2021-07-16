@@ -199,7 +199,8 @@ struct NodeGraph<'a> {
 impl<'a> NodeGraph<'a> {
     // I didn't know where to put this, so it's here.
     fn next_visited_bit_index(&self) -> usize {
-        self.visited_bit_index.replace(self.visited_bit_index.get() + 1)
+        self.visited_bit_index
+            .replace(self.visited_bit_index.get() + 1)
     }
 
     // Compile a command into a graph, returning `None` if the given input does not map to a valid
@@ -528,14 +529,19 @@ impl<'a> NodeGraph<'a> {
                                 } else {
                                     None
                                 },
-                                successors
+                                successors,
                             ),
                         );
                     }
                 }
             }
 
-            Node::Literal { transient, lit, as_token, .. } => {
+            Node::Literal {
+                transient,
+                lit,
+                as_token,
+                ..
+            } => {
                 // Literals are easier to handle. If they were previously defined, extend their
                 // successor list, else define them with the given successors.
 
@@ -544,8 +550,7 @@ impl<'a> NodeGraph<'a> {
                 match self.flat_graph.get_mut(&unique_name) {
                     Some(node_data) => {
                         if as_token.is_some() || transient.is_some() {
-                            lit
-                                .span()
+                            lit.span()
                                 .unwrap()
                                 .error("Literal already defined")
                                 .span_note(
@@ -568,7 +573,7 @@ impl<'a> NodeGraph<'a> {
                                 } else {
                                     None
                                 },
-                                successors
+                                successors,
                             ),
                         );
                     }
@@ -732,9 +737,9 @@ impl<'a> NodeGraph<'a> {
         });
 
         quote! {
-            pub struct #name<'cmd> {
-                #( pub #names : #types, )*
-                pub __visited: u128,
+            pub(super) struct #name<'cmd> {
+                #( pub(super) #names : #types, )*
+                pub(super) __visited: u128,
                 _phantom: ::std::marker::PhantomData<&'cmd ()>
             }
 
@@ -878,10 +883,18 @@ impl<'a> NodeGraph<'a> {
         }
 
         let node_dispatch_fn_names = iter.clone().map(|NodeData { definition, .. }| {
-            format_ident!("dispatch_{}_{}", name.to_string(), definition.unique_ident())
+            format_ident!(
+                "dispatch_{}_{}",
+                name.to_string(),
+                definition.unique_ident()
+            )
         });
         let node_suggestions_fn_names = iter.clone().map(|NodeData { definition, .. }| {
-            format_ident!("get_suggestions_{}_{}", name.to_string(), definition.unique_ident())
+            format_ident!(
+                "get_suggestions_{}_{}",
+                name.to_string(),
+                definition.unique_ident()
+            )
         });
 
         let node_dispatch_fn_context_names =
@@ -1065,7 +1078,8 @@ impl<'a> NodeGraph<'a> {
                     ..
                 } => {
                     let unique_ident = node.unique_ident();
-                    let dispatch_fn = format_ident!("dispatch_{}_{}", root_name.to_string(), unique_ident);
+                    let dispatch_fn =
+                        format_ident!("dispatch_{}_{}", root_name.to_string(), unique_ident);
 
                     // Determine whether we need to turn the parsed argument into an option due
                     // a default value
@@ -1083,7 +1097,7 @@ impl<'a> NodeGraph<'a> {
                     } else {
                         quote! {
                             <#ty as ::quartz_commands::FromArgument<'cmd, _>>
-                                ::from_arg(__arg, &#context_ident)?
+                                ::from_arg(__arg, __args, &#context_ident)?
                         }
                     };
 
@@ -1254,7 +1268,7 @@ impl<'a> NodeGraph<'a> {
                             quote! {
                                 if let ::core::result::Result::Ok(value) =
                                     <#ty as ::quartz_commands::FromArgument<'cmd, _>>
-                                    ::from_arg(__arg, &#context_ident)
+                                    ::from_arg(__arg, __args, &#context_ident)
                                 {
                                     __data.#unique_ident = #var_wrapper (value);
                                 }
@@ -1265,10 +1279,14 @@ impl<'a> NodeGraph<'a> {
                             if <#ty as ::quartz_commands::FromArgument<'cmd, #context_type>>
                                 ::partial_matches(__arg)
                             {
+                                let __anchor_start = __args.__anchor();
                                 #parser
                                 __suggestions.extend(
                                     Self::#get_suggestions_fn(__args, #context_ident, __arg, __data)
                                 );
+                                if __args.__anchor() != __anchor_start {
+                                    return __suggestions;
+                                }
                             }
                         })
                     },
@@ -1307,7 +1325,7 @@ struct NodeData<'a> {
 }
 
 impl<'a> NodeData<'a> {
-    pub fn with_successors(
+    fn with_successors(
         definition: &'a Node,
         unique_index: Option<usize>,
         successors: Vec<&'a Node>,
@@ -1373,7 +1391,10 @@ fn ident_get_suggestions_node<T: ToString>(name: &T) -> Ident {
 }
 
 fn ident_data_struct<T: ToString>(name: &T) -> Ident {
-    format_ident!("CommandData{}", name.to_string().to_lowercase().replace("_", ""))
+    format_ident!(
+        "CommandData{}",
+        name.to_string().to_lowercase().replace("_", "")
+    )
 }
 
 /// Returns whether or not the two nodes share the same name in a way that would cause a name conflict.
