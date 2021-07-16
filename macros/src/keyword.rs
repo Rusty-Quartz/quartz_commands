@@ -6,3 +6,4 @@ custom_keyword!(suggests);
 custom_keyword!(any);
 custom_keyword!(root);
 custom_keyword!(greedy);
+custom_keyword!(transient);

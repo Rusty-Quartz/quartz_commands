@@ -10,9 +10,9 @@ mod gen;
 mod keyword;
 mod parse;
 
-use syn::{DeriveInput, TypePath, parse_macro_input, Data, Error, Fields};
 use proc_macro2::Literal;
 use quote::quote;
+use syn::{parse_macro_input, Data, DeriveInput, Error, Fields, TypePath};
 
 #[allow(missing_docs)]
 #[proc_macro]
@@ -20,7 +20,7 @@ pub fn module(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let module = parse_macro_input!(item as parse::CommandModule);
     match gen::generate_module(module) {
         Some(output) => output.into(),
-        None => proc_macro::TokenStream::new()
+        None => proc_macro::TokenStream::new(),
     }
 }
 
@@ -30,19 +30,27 @@ pub fn derive_from_argument(item: proc_macro::TokenStream) -> proc_macro::TokenS
     let input = parse_macro_input!(item as DeriveInput);
     let data_enum = match input.data {
         Data::Enum(data_enum) => data_enum,
-        _ => return Error::new_spanned(input, "FromArgument can only be derived on enums whose variants are field-less.")
+        _ =>
+            return Error::new_spanned(
+                input,
+                "FromArgument can only be derived on enums whose variants are field-less.",
+            )
             .to_compile_error()
-            .into()
+            .into(),
     };
 
     let mut arg_literals = Vec::new();
     let mut match_arms = Vec::new();
     for variant in &data_enum.variants {
         if !matches!(&variant.fields, Fields::Unit) {
-            return Error::new_spanned(variant, "Variants cannot have fields.").to_compile_error().into();
+            return Error::new_spanned(variant, "Variants cannot have fields.")
+                .to_compile_error()
+                .into();
         }
 
-        arg_literals.push(Literal::string(&pascal_to_kebab(&variant.ident.to_string())));
+        arg_literals.push(Literal::string(&pascal_to_kebab(
+            &variant.ident.to_string(),
+        )));
         let arg_repr = arg_literals.last().unwrap();
         let variant_name = &variant.ident;
 
@@ -53,7 +61,7 @@ pub fn derive_from_argument(item: proc_macro::TokenStream) -> proc_macro::TokenS
 
     let ident = &input.ident;
     let ident_str = Literal::string(&ident.to_string());
-    
+
     // Since all the variants are field-less, we don't need to worry about copying over generics.
     (quote! {
         impl<C> ::quartz_commands::FromArgument<'_, C> for #ident {

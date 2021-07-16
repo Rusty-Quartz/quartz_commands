@@ -4,7 +4,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote, IdentFragment, ToTokens, TokenStreamExt};
 use std::{
     collections::hash_map::DefaultHasher,
-    fmt::{self, Display, Formatter},
+    fmt::{self, Debug, Display, Formatter},
     hash::{Hash, Hasher},
 };
 use syn::{
@@ -67,6 +67,7 @@ impl Parse for CommandModule {
         }
 
         // If there are generics, ensure it's just <'ctx>
+        // TODO: allow other lifetime names and more generics and update docs
         if !context_type_defn.generics.params.is_empty() {
             if context_type_defn.generics.params.len() > 1
                 || !matches!(
@@ -227,6 +228,7 @@ pub enum Node {
     /// the type String and &'cmd str can be declared as `greedy`, meaning they consume the
     /// rest of the command buffer.
     Argument {
+        transient: Option<keyword::transient>,
         name: StrIdent,
         colon: Option<Token![:]>,
         greedy: Option<keyword::greedy>,
@@ -237,6 +239,7 @@ pub enum Node {
     /// A literal node, which is represented by a string literal. These can be renamed and
     /// bound to an identifier. Examples include `"foo"`, and `"foo" as foo_rebound`.
     Literal {
+        transient: Option<keyword::transient>,
         lit: LitStrRef,
         as_token: Option<Token![as]>,
         renamed: Option<StrIdent>,
@@ -278,15 +281,39 @@ impl Node {
             Node::Argument { name, .. } => name.ident.clone(),
             Node::Literal { lit, renamed, .. } => match renamed {
                 Some(name) => name.ident.clone(),
-                None => unique_ident_for_lit_str(lit)
+                None => unique_ident_for_lit_str(lit),
             },
             _ => panic!("Only `Argument` and `Literal` node types have names."),
         }
     }
 }
 
+impl Debug for Node {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Node::Argument { name, .. } => write!(f, "{}", name.as_str()),
+            Node::Literal { lit, .. } => write!(f, "\"{}\"", lit.as_str()),
+            Node::CommandRoot(_) => write!(f, "root"),
+            Node::Any { nodes, .. } => write!(
+                f,
+                "any{:?}",
+                nodes
+                    .iter()
+                    .map(|node| format!("{:?}", node))
+                    .collect::<Vec<_>>()
+            ),
+        }
+    }
+}
+
 impl Parse for Node {
     fn parse(input: ParseStream) -> Result<Self> {
+        let transient = if input.peek(keyword::transient) {
+            Some(input.parse()?)
+        } else {
+            None
+        };
+
         let lookahead = input.lookahead1();
 
         // See if we're the root node
@@ -393,6 +420,7 @@ impl Parse for Node {
             };
 
             Ok(Node::Argument {
+                transient,
                 name,
                 colon,
                 greedy,
@@ -425,6 +453,7 @@ impl Parse for Node {
             };
 
             Ok(Node::Literal {
+                transient,
                 lit,
                 as_token,
                 renamed,
@@ -441,6 +470,7 @@ impl ToTokens for Node {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let tks = match self {
             Node::Argument {
+                transient,
                 name,
                 colon,
                 greedy,
@@ -448,13 +478,14 @@ impl ToTokens for Node {
                 eq,
                 default,
             } => quote! {
-                #name #colon #greedy #ty #eq #default
+                #transient #name #colon #greedy #ty #eq #default
             },
             Node::Literal {
+                transient,
                 lit,
                 as_token,
                 renamed,
-            } => quote! { #lit #as_token #renamed },
+            } => quote! { #transient #lit #as_token #renamed },
             Node::CommandRoot(root) => quote! { #root },
             Node::Any { any, name, nodes } => quote! {
                 #any #name [ #nodes ]
@@ -484,57 +515,6 @@ impl<'a> Iterator for FlattenNodeIter<'a> {
         match self {
             FlattenNodeIter::Singleton(node) => node.into_iter().size_hint(),
             FlattenNodeIter::Multiple(iter) => iter.size_hint(),
-        }
-    }
-}
-
-/// Similar to `Node`, however this type on represents node references, not node definitions.
-/// Argument nodes are referenced by their name, literals by their string literal or their
-/// renamed identifier, and the command root by the keyword `root`.
-pub enum NodeRef {
-    Ident(StrIdent),
-    Literal(LitStrRef),
-    Root(keyword::root),
-}
-
-impl NodeRef {
-    /// Returns the result of `unique_ident` as a string.
-    pub fn unique_name(&self) -> String {
-        self.unique_ident().to_string()
-    }
-
-    /// Same behavior as `Node::unique_ident`. Note that renamed literals are represented with
-    /// the `Ident` variant.
-    pub fn unique_ident(&self) -> Ident {
-        match self {
-            NodeRef::Ident(name) => name.ident.clone(),
-            NodeRef::Literal(lit) => unique_ident_for_lit_str(lit),
-            _ => panic!("Only `Argument` and `Literal` node types have names."),
-        }
-    }
-}
-
-impl Parse for NodeRef {
-    fn parse(input: ParseStream) -> Result<Self> {
-        let lookahead = input.lookahead1();
-        if lookahead.peek(keyword::root) {
-            Ok(NodeRef::Root(input.parse()?))
-        } else if lookahead.peek(Ident) {
-            Ok(NodeRef::Ident(input.parse()?))
-        } else if lookahead.peek(LitStr) {
-            Ok(NodeRef::Literal(input.parse()?))
-        } else {
-            Err(lookahead.error())
-        }
-    }
-}
-
-impl ToTokens for NodeRef {
-    fn to_tokens(&self, tokens: &mut TokenStream) {
-        match self {
-            NodeRef::Ident(ident) => ident.to_tokens(tokens),
-            NodeRef::Literal(lit) => lit.to_tokens(tokens),
-            NodeRef::Root(root) => root.to_tokens(tokens),
         }
     }
 }
@@ -592,7 +572,7 @@ impl ToTokens for HandlerType {
 /// and suggester bindings, and guarantees that all appropriate fields will be present
 /// depending on the binding type.
 pub struct HandlerBinding {
-    pub node_ref: NodeRef,
+    pub node_ref: Node,
     pub handler_type: HandlerType,
     pub or1_token: Token![|],
     pub context: StrIdent,
@@ -605,6 +585,27 @@ pub struct HandlerBinding {
 impl Parse for HandlerBinding {
     fn parse(input: ParseStream) -> Result<Self> {
         let node_ref = input.parse()?;
+
+        match &node_ref {
+            Node::Argument { colon: Some(_), .. } | Node::Argument { transient: Some(_), .. } =>
+                return Err(Error::new_spanned(
+                    node_ref,
+                    "Argument node definition not allowed here",
+                )),
+            Node::Literal {
+                as_token: Some(_), ..
+            } | Node::Literal { transient: Some(_), .. } =>
+                return Err(Error::new_spanned(
+                    node_ref,
+                    "Literal renaming not allowed here",
+                )),
+            Node::Any { name: Some(_), .. } =>
+                return Err(Error::new_spanned(
+                    node_ref,
+                    "`any` nodes cannot be bound to an identifier here",
+                )),
+            _ => {}
+        }
 
         // Determine whether we are an executor or suggester.
         let lookahead = input.lookahead1();

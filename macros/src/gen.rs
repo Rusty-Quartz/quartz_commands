@@ -1,7 +1,11 @@
-use crate::parse::{Command, CommandModule, HandlerBinding, HandlerType, Node, NodeRef, StrIdent};
+use crate::parse::{Command, CommandModule, HandlerBinding, HandlerType, Node, StrIdent};
 use proc_macro2::{Literal, TokenStream};
 use quote::{format_ident, quote, ToTokens};
-use std::{cell::{Cell, RefCell}, cmp::Ordering, collections::HashMap};
+use std::{
+    cell::{Cell, RefCell},
+    cmp::Ordering,
+    collections::HashMap,
+};
 use syn::{spanned::Spanned, Ident, Lifetime, Type};
 
 // Generates a struct and module of data structs which implement the supplied command
@@ -90,27 +94,25 @@ pub fn generate_module(input: CommandModule) -> Option<TokenStream> {
 
     // Build the module's suggestion generator arms. These will map commands and their aliases
     // to their associated suggestion generation functions.
-    let module_suggest_arms = input.definitions
-        .iter()
-        .map(|command| {
-            // Convert the aliases to string literals
-            let str_aliases = command
-                .aliases
-                .iter()
-                .map(|alias| Literal::string(alias.as_str()));
-            // Get the name of the suggester function
-            let get_suggestions_func = ident_get_suggestions_node(command.name());
+    let module_suggest_arms = input.definitions.iter().map(|command| {
+        // Convert the aliases to string literals
+        let str_aliases = command
+            .aliases
+            .iter()
+            .map(|alias| Literal::string(alias.as_str()));
+        // Get the name of the suggester function
+        let get_suggestions_func = ident_get_suggestions_node(command.name());
 
-            quote! {
-                ::core::option::Option::Some(__arg @ (#( #str_aliases )|*)) =>
-                    Self::#get_suggestions_func(
-                        &mut __args,
-                        __context,
-                        __arg,
-                        &mut ::core::default::Default::default()
-                    )
-            }
-        });
+        quote! {
+            ::core::option::Option::Some(__arg @ (#( #str_aliases )|*)) =>
+                Self::#get_suggestions_func(
+                    &mut __args,
+                    __context,
+                    __arg,
+                    &mut ::core::default::Default::default()
+                )
+        }
+    });
 
     // Get a list of commands as string literals for the default suggestions
     let command_list = input
@@ -187,6 +189,7 @@ pub fn generate_module(input: CommandModule) -> Option<TokenStream> {
 // into a flattened graph of nodes paired with their successors.
 struct NodeGraph<'a> {
     flat_graph: HashMap<String, NodeData<'a>>,
+    visited_bit_index: Cell<usize>,
     named_any_nodes: HashMap<String, &'a Node>,
     root_executes: Option<&'a HandlerBinding>,
     root_suggests: Option<&'a HandlerBinding>,
@@ -194,12 +197,18 @@ struct NodeGraph<'a> {
 }
 
 impl<'a> NodeGraph<'a> {
+    // I didn't know where to put this, so it's here.
+    fn next_visited_bit_index(&self) -> usize {
+        self.visited_bit_index.replace(self.visited_bit_index.get() + 1)
+    }
+
     // Compile a command into a graph, returning `None` if the given input does not map to a valid
     // graph.
     fn compile(command_definition: &'a Command) -> Option<Self> {
         // Initialize the graph
         let mut graph = NodeGraph {
             flat_graph: HashMap::new(),
+            visited_bit_index: Cell::new(0),
             named_any_nodes: HashMap::new(),
             root_executes: None,
             root_suggests: None,
@@ -218,7 +227,10 @@ impl<'a> NodeGraph<'a> {
                         // If the flattened graph already contains the node, then the user is
                         // extending another branch. Duplicates are checked during successor
                         // resolution.
-                        if graph.flat_graph.contains_key(&candidate_root_successor.unique_name()) {
+                        let unique_name = candidate_root_successor.unique_name();
+                        if graph.flat_graph.contains_key(&unique_name)
+                            || graph.named_any_nodes.contains_key(&unique_name)
+                        {
                             continue;
                         }
 
@@ -250,19 +262,18 @@ impl<'a> NodeGraph<'a> {
             for i in 0 .. branch.nodes.len() {
                 let node = &branch.nodes[i];
 
-                if let Node::Any { name: Some(name), .. } = node {
+                if let Node::Any {
+                    name: Some(name), ..
+                } = node
+                {
                     graph.named_any_nodes.insert(name.to_string(), node);
                 }
 
-                let node = graph.node_definition(node);
-                let successor = branch.nodes.get(i + 1)
-                    // FIXME: this map causes a segfault when running `cargo expand --example simple`
-                    .map(|node| graph.node_definition(node));
+                let node = graph.map_any(node);
+                let successor = branch.nodes.get(i + 1).map(|node| graph.map_any(node));
 
-                for node in node.flatten() {
-                    if !graph.resolve_successor(graph.node_definition(node), successor) {
-                        failed = true;
-                    }
+                if !graph.resolve_successor(node, successor) {
+                    failed = true;
                 }
             }
         }
@@ -271,58 +282,76 @@ impl<'a> NodeGraph<'a> {
             return None;
         }
 
-        // Apply the handler bindings
-        for handler_binding in &command_definition.handler_bindings {
-            // We handle the root separately. Essentially, if a handler binding of a certain type
-            // was not already bound to the root, then bind it, else error.
-            if let NodeRef::Root(_) = &handler_binding.node_ref {
-                match &handler_binding.handler_type {
-                    HandlerType::Executor(_) => match graph.root_executes {
-                        Some(root_handler_binding) => {
-                            root_handler_binding
-                                .span()
-                                .unwrap()
-                                .error("Multiple executors cannot be bound to a node")
-                                .span_note(
-                                    graph.root_executes.unwrap().span().unwrap(),
-                                    "Executor first bound here",
-                                )
-                                .emit();
-                            failed = true;
-                        }
-                        None => graph.root_executes = Some(handler_binding),
-                    },
+        // Figure out which arguments are guaranteed to have values so we know what to unwrap
+        // during dispatching.
+        graph.track_defined_args();
 
-                    HandlerType::Suggester(_) => match graph.root_suggests {
-                        Some(root_handler_binding) => {
-                            root_handler_binding
-                                .span()
-                                .unwrap()
-                                .error("Multiple suggestion generators cannot be bound to a node")
-                                .span_note(
-                                    graph.root_executes.unwrap().span().unwrap(),
-                                    "Suggestion generator first bound here",
-                                )
-                                .emit();
-                            failed = true;
+        // Apply the handler bindings, and do any additional argument tracking
+        for handler_binding in &command_definition.handler_bindings {
+            let node_ref = graph.map_any(&handler_binding.node_ref);
+
+            // We need to have all nodes bound to this executor agree on which arguments
+            // are defined
+            if matches!(node_ref, Node::Any { .. }) {
+                let arg_union: DefinedArguments<'a> = DefinedArguments::new();
+
+                for node_ref in node_ref.flatten() {
+                    match node_ref {
+                        Node::CommandRoot(_) => {
+                            arg_union.args.borrow_mut().clear();
+                            break;
                         }
-                        None => graph.root_suggests = Some(handler_binding),
-                    },
+                        _ => {}
+                    }
+
+                    // Undefined references handled below
+                    if let Some(defined_args) = graph
+                        .flat_graph
+                        .get(&node_ref.unique_name())
+                        .map(|data| data.defined_arguments.args.borrow())
+                    {
+                        arg_union.update(&*defined_args);
+                    }
                 }
 
-                // Skip to the next binding
-                continue;
+                for node_ref in node_ref
+                    .flatten()
+                    .filter(|node| !matches!(node, Node::CommandRoot(_)))
+                {
+                    // Undefined references handled below
+                    if let Some(mut defined_args) = graph
+                        .flat_graph
+                        .get(&node_ref.unique_name())
+                        .map(|data| data.defined_arguments.args.borrow_mut())
+                    {
+                        *defined_args = arg_union.args.borrow().clone()
+                    }
+                }
             }
 
-            // Grab the node data that we're binding to based off the node ref's unique name
-            let node_data_for_binding =
-                match graph.flat_graph.get_mut(&handler_binding.node_ref.unique_name()) {
+            for node_ref in graph.map_any(&handler_binding.node_ref).flatten() {
+                // We handle the root separately.
+                if let Node::CommandRoot(_) = &node_ref {
+                    if !Self::bind_handler(
+                        handler_binding,
+                        &mut graph.root_executes,
+                        &mut graph.root_suggests,
+                    ) {
+                        failed = true;
+                    }
+
+                    // Skip to the next node/binding
+                    continue;
+                }
+
+                // Grab the node data that we're binding to based off the node ref's unique name
+                let node_data_for_binding = match graph.flat_graph.get_mut(&node_ref.unique_name())
+                {
                     Some(data) => data,
 
                     // Node data not found
                     None => {
-                        handler_binding
-                            .node_ref
+                        node_ref
                             .span()
                             .unwrap()
                             .error("Undefined node reference")
@@ -331,39 +360,27 @@ impl<'a> NodeGraph<'a> {
                         continue;
                     }
                 };
-            
-            // If the handler was not already bound, then bind it, else error.
-            // TODO: figure out how to have the root use the same code
-            match &handler_binding.handler_type {
-                HandlerType::Executor(_) => match node_data_for_binding.executes {
-                    Some(handler) => {
-                        handler
-                            .span()
-                            .unwrap()
-                            .error("Multiple executors cannot be bound to a node")
-                            .span_note(handler.span().unwrap(), "Executor first bound here")
-                            .emit();
-                        failed = true;
-                    }
-                    None => node_data_for_binding.executes = Some(handler_binding),
-                },
 
-                HandlerType::Suggester(_) => match node_data_for_binding.suggests {
-                    Some(handler) => {
-                        handler_binding
-                            .span()
-                            .unwrap()
-                            .error("Multiple suggestion generators cannot be bound to a node")
-                            .span_note(
-                                handler.span().unwrap(),
-                                "Suggestion generator first bound here",
-                            )
-                            .emit();
-                        failed = true;
-                    }
-                    None => node_data_for_binding.suggests = Some(handler_binding),
-                },
+                // If the handler was not already bound, then bind it, else error.
+                if !Self::bind_handler(
+                    handler_binding,
+                    &mut node_data_for_binding.executes,
+                    &mut node_data_for_binding.suggests,
+                ) {
+                    failed = true;
+                }
             }
+        }
+
+        if graph.root_executes.is_none() && graph.root_successors.is_empty() {
+            command_definition
+                .name()
+                .span()
+                .unwrap()
+                .error("Root must have an executor")
+                .help("Consider adding a `root executes` statement in the command body")
+                .emit();
+            return None;
         }
 
         // If we failed the previous step or any nodes have duplicate successors, then a valid
@@ -371,65 +388,90 @@ impl<'a> NodeGraph<'a> {
         if failed || graph.has_successor_duplicates() {
             None
         } else {
-            // Figure out which arguments are guaranteed to have values so we know what to unwrap
-            // during dispatching.
-            graph.track_defined_args();
-
             Some(graph)
         }
     }
 
-    fn node_definition(&self, node: &'a Node) -> &'a Node {
+    fn bind_handler(
+        binding: &'a HandlerBinding,
+        executes: &mut Option<&'a HandlerBinding>,
+        suggests: &mut Option<&'a HandlerBinding>,
+    ) -> bool {
+        // If the handler was not already bound, then bind it, else error.
+        match &binding.handler_type {
+            HandlerType::Executor(_) => match executes {
+                Some(handler) => {
+                    handler
+                        .span()
+                        .unwrap()
+                        .error("Multiple executors cannot be bound to a node")
+                        .span_note(handler.span().unwrap(), "Executor first bound here")
+                        .emit();
+                    return false;
+                }
+                None => *executes = Some(binding),
+            },
+
+            HandlerType::Suggester(_) => match suggests {
+                Some(handler) => {
+                    handler
+                        .span()
+                        .unwrap()
+                        .error("Multiple suggestion generators cannot be bound to a node")
+                        .span_note(
+                            handler.span().unwrap(),
+                            "Suggestion generator first bound here",
+                        )
+                        .emit();
+                    return false;
+                }
+                None => *suggests = Some(binding),
+            },
+        }
+
+        true
+    }
+
+    fn map_any(&self, node: &'a Node) -> &'a Node {
         match node {
             Node::CommandRoot(_) => node,
             Node::Any { .. } => node,
-            Node::Argument { ty: Some(_), .. } => node,
             Node::Literal { .. } => node,
-            _ => {
-                match self.flat_graph.get(&node.unique_name()).map(|data| data.definition) {
-                    Some(node_defn) => return node_defn,
-                    None => {}
-                }
-
-                match self.named_any_nodes.get(&node.unique_name()) {
-                    Some(any_node) => any_node,
-                    None => node
-                }
-            }
+            _ => match self.named_any_nodes.get(&node.unique_name()) {
+                Some(any_node) => any_node,
+                None => node,
+            },
         }
     }
 
     fn resolve_successor(&mut self, node: &'a Node, successor: Option<&'a Node>) -> bool {
-        // Flatten a potential `Any` node
+        // Flatten a potential `any` node
         let successors = successor
             .into_iter()
+            .map(|node| self.map_any(node))
             .flat_map(Node::flatten)
-            .map(|node| self.node_definition(node))
             .collect::<Vec<_>>();
 
         match node {
             Node::Argument {
+                transient,
                 name: raw_node_name,
                 greedy,
                 ty: node_type,
-                default,
                 ..
             } => {
                 // Grab the unique name of the node
                 let unique_name = node.unique_name();
 
                 // If this node has already been defined, then grab information about its
-                // definition, including whether or not it's greedy and/or has a default value.
+                // definition, i.e. whether or not it's a greedy value.
                 // If the node was not already defined, then use the provided node's information.
-                let (cached_greedy, cached_default) = match self.flat_graph.get(&unique_name) {
+                let cached_greedy = match self.flat_graph.get(&unique_name) {
                     Some(NodeData {
-                        definition:
-                            Node::Argument {
-                                greedy, default, ..
-                            },
+                        definition: Node::Argument { greedy, .. },
                         ..
-                    }) => (greedy, default),
-                    _ => (greedy, default),
+                    }) => greedy,
+                    _ => greedy,
                 };
 
                 // Since greedy nodes consume the command buffer, it's illogical for them to have
@@ -443,38 +485,13 @@ impl<'a> NodeGraph<'a> {
                     return false;
                 }
 
-                // A node with a default value must have successors with default values as well.
-                if cached_default.is_some()
-                    && successor.is_some()
-                    && !successor
-                        .clone()
-                        .into_iter()
-                        .flat_map(Node::flatten)
-                        .all(|node| {
-                            matches!(node, Node::Argument {
-                                default: Some(_),
-                                ..
-                            })
-                        })
-                {
-                    successor
-                        .span()
-                        .unwrap()
-                        .error(
-                            "Cannot have non-default argument successors after a default argument \
-                             node",
-                        )
-                        .emit();
-                    return false;
-                }
-
                 // Try to insert the node into the flat graph, and check for duplicate definitions
                 match self.flat_graph.get_mut(&unique_name) {
                     // The node has already been defined
                     Some(node_data) => {
                         // If there's a type specifier, then the user is trying to illegally
                         // redefine the node
-                        if node_type.is_some() {
+                        if node_type.is_some() || transient.is_some() {
                             raw_node_name
                                 .span()
                                 .unwrap()
@@ -504,13 +521,21 @@ impl<'a> NodeGraph<'a> {
 
                         self.flat_graph.insert(
                             unique_name,
-                            NodeData::with_successors(node, successors),
+                            NodeData::with_successors(
+                                node,
+                                if transient.is_none() {
+                                    Some(self.next_visited_bit_index())
+                                } else {
+                                    None
+                                },
+                                successors
+                            ),
                         );
                     }
                 }
             }
 
-            Node::Literal { .. } => {
+            Node::Literal { transient, lit, as_token, .. } => {
                 // Literals are easier to handle. If they were previously defined, extend their
                 // successor list, else define them with the given successors.
 
@@ -518,12 +543,33 @@ impl<'a> NodeGraph<'a> {
 
                 match self.flat_graph.get_mut(&unique_name) {
                     Some(node_data) => {
+                        if as_token.is_some() || transient.is_some() {
+                            lit
+                                .span()
+                                .unwrap()
+                                .error("Literal already defined")
+                                .span_note(
+                                    node_data.definition.span().unwrap(),
+                                    "Literal first defined here",
+                                )
+                                .emit();
+                            return false;
+                        }
+
                         node_data.successors.extend(successors);
                     }
                     None => {
                         self.flat_graph.insert(
                             unique_name,
-                            NodeData::with_successors(node, successors),
+                            NodeData::with_successors(
+                                node,
+                                if transient.is_none() {
+                                    Some(self.next_visited_bit_index())
+                                } else {
+                                    None
+                                },
+                                successors
+                            ),
                         );
                     }
                 }
@@ -546,7 +592,7 @@ impl<'a> NodeGraph<'a> {
                     .emit();
                 return false;
             }
-            
+
             Node::Any { nodes, .. } => {
                 // Flatten out the node by resolving the provided successor with every node within
                 // this node
@@ -593,7 +639,7 @@ impl<'a> NodeGraph<'a> {
     /// information.
     fn track_defined_args(&mut self) {
         for &node in self.root_successors.iter() {
-            self.resolve_defined_args(node, Vec::new());
+            self.resolve_defined_args(node, Vec::new(), Vec::new());
         }
     }
 
@@ -601,6 +647,7 @@ impl<'a> NodeGraph<'a> {
     fn resolve_defined_args(
         &self,
         node: &'a Node,
+        mut defined: Vec<&'a Node>,
         mut stack: Vec<&'a Node>,
     ) {
         // The only other option is the root, which is considered to have no arguments defined
@@ -609,19 +656,25 @@ impl<'a> NodeGraph<'a> {
         }
 
         // We've detected a cycle and therefore can exit
-        if stack.iter().any(|&stack_node| node_name_eq(node, stack_node)) {
+        if stack
+            .iter()
+            .any(|&stack_node| node_name_eq(node, stack_node))
+        {
             return;
         }
+
+        // We've now visited this node
+        stack.push(node);
 
         // This node is now considered defined since we're visiting it, but we only keep track of
         // non-default argument nodes
         if matches!(node, Node::Argument { default: None, .. }) {
-            stack.push(node);
+            defined.push(node);
         }
 
         // Update the defined arguments with the current stack, see `update` for details
         let node_data = self.flat_graph.get(&node.unique_name()).unwrap();
-        node_data.defined_arguments.update(&stack);
+        node_data.defined_arguments.update(&defined);
 
         // No successors means we're done
         if node_data.successors.is_empty() {
@@ -629,18 +682,22 @@ impl<'a> NodeGraph<'a> {
         }
 
         // We only need to copy the stack if there are more than one successor
-        for &successor in node_data.successors.iter().take(node_data.successors.len() - 1) {
-            self.resolve_defined_args(successor, stack.clone());
+        for &successor in node_data
+            .successors
+            .iter()
+            .take(node_data.successors.len() - 1)
+        {
+            self.resolve_defined_args(successor, defined.clone(), stack.clone());
         }
 
         // Unwrap guaranteed to work because of the check for an empty successor list
-        self.resolve_defined_args(node_data.successors.last().unwrap(), stack);
+        self.resolve_defined_args(node_data.successors.last().unwrap(), defined, stack);
     }
 
     /// Generates a struct for all the arguments in a given command. All non-default arguments
     /// will be represented as options, whereas default arguments will be the type they are
     /// defined as.
-    fn gen_data_struct(&self, name: &impl quote::IdentFragment) -> TokenStream {
+    fn gen_data_struct(&self, name: &impl ToString) -> TokenStream {
         let name = ident_data_struct(name);
 
         // Iterator over node data and node names
@@ -677,6 +734,7 @@ impl<'a> NodeGraph<'a> {
         quote! {
             pub struct #name<'cmd> {
                 #( pub #names : #types, )*
+                pub __visited: u128,
                 _phantom: ::std::marker::PhantomData<&'cmd ()>
             }
 
@@ -684,6 +742,7 @@ impl<'a> NodeGraph<'a> {
                 fn default() -> Self {
                     Self {
                         #( #names : #defaults, )*
+                        __visited: 0,
                         _phantom: ::std::marker::PhantomData
                     }
                 }
@@ -695,7 +754,7 @@ impl<'a> NodeGraph<'a> {
     /// guaranteed to be defined.
     fn gen_unpack_data_struct(
         &self,
-        name: &impl quote::IdentFragment,
+        name: &impl ToString,
         data_mod_name: &impl ToTokens,
         defined_args: &[&Node],
     ) -> TokenStream {
@@ -714,7 +773,11 @@ impl<'a> NodeGraph<'a> {
             .iter()
             .filter(|(_, data)| matches!(data.definition, Node::Argument { default: None, .. }))
             .map(|(name, data)| (name, data.definition))
-            .filter(|&(_, node)| defined_args.into_iter().any(|defined_node| node_name_eq(node, defined_node)))
+            .filter(|&(_, node)| {
+                defined_args
+                    .into_iter()
+                    .any(|defined_node| node_name_eq(node, defined_node))
+            })
             .map(|(str_name, _)| format_ident!("{}", str_name))
             .collect::<Vec<_>>();
 
@@ -733,7 +796,7 @@ impl<'a> NodeGraph<'a> {
         context_lifetime: &Option<Lifetime>,
     ) -> Option<TokenStream>
     where
-        T: quote::IdentFragment + Spanned,
+        T: ToString + Spanned,
     {
         let root_dispatch_fn = ident_dispatch_node(name);
         let root_suggestions_fn = ident_get_suggestions_node(name);
@@ -757,6 +820,8 @@ impl<'a> NodeGraph<'a> {
             data_mod_name,
             context_type,
             name,
+            None,
+            None,
             self.root_executes.clone(),
             &self.root_successors,
             &[],
@@ -773,19 +838,35 @@ impl<'a> NodeGraph<'a> {
         let iter = self.flat_graph.iter().map(|(_, node_data)| node_data);
 
         let mut node_dispatch_fn_matches = Vec::with_capacity(self.flat_graph.len());
-        for NodeData { definition, executes, successors, defined_arguments, .. } in iter.clone() {
+        for NodeData {
+            definition,
+            executes,
+            successors,
+            defined_arguments,
+            unique_index,
+            ..
+        } in iter.clone()
+        {
             node_dispatch_fn_matches.push(self.gen_dispatch_match(
                 name,
                 data_mod_name,
                 context_type,
                 definition,
+                Some(definition),
+                unique_index.clone(),
                 *executes,
                 successors,
                 &*defined_arguments.args.borrow(),
             )?);
         }
         let mut node_suggestions_fn_matches = Vec::with_capacity(self.flat_graph.len());
-        for NodeData { definition, suggests, successors, .. } in iter.clone() {
+        for NodeData {
+            definition,
+            suggests,
+            successors,
+            ..
+        } in iter.clone()
+        {
             node_suggestions_fn_matches.push(self.gen_suggestions_match(
                 name,
                 data_mod_name,
@@ -797,10 +878,10 @@ impl<'a> NodeGraph<'a> {
         }
 
         let node_dispatch_fn_names = iter.clone().map(|NodeData { definition, .. }| {
-            format_ident!("dispatch_{}_{}", name, definition.unique_ident())
+            format_ident!("dispatch_{}_{}", name.to_string(), definition.unique_ident())
         });
         let node_suggestions_fn_names = iter.clone().map(|NodeData { definition, .. }| {
-            format_ident!("get_suggestions_{}_{}", name, definition.unique_ident())
+            format_ident!("get_suggestions_{}_{}", name.to_string(), definition.unique_ident())
         });
 
         let node_dispatch_fn_context_names =
@@ -874,10 +955,12 @@ impl<'a> NodeGraph<'a> {
     /// Generates a match statement for a node dispatch function.
     fn gen_dispatch_match(
         &self,
-        root_name: &impl quote::IdentFragment,
+        root_name: &impl ToString,
         data_mod_name: &impl ToTokens,
         context_type: &Box<Type>,
         definition: &impl Spanned,
+        node_definition: Option<&Node>,
+        unique_index: Option<usize>,
         executes: Option<&HandlerBinding>,
         successors: &[&Node],
         defined_args: &[&Node],
@@ -973,60 +1056,109 @@ impl<'a> NodeGraph<'a> {
             _ => Ordering::Equal,
         });
 
-        let branches = case_nodes.into_iter()
-            .flat_map(|node| {
-                match node {
-                    Node::Argument { greedy, ty: Some(ty), default, .. } => {
-                        let unique_ident = node.unique_ident();
-                        let dispatch_fn = format_ident!("dispatch_{}_{}", root_name, unique_ident);
+        let branches = case_nodes.into_iter().flat_map(|node| {
+            match node {
+                Node::Argument {
+                    greedy,
+                    ty: Some(ty),
+                    default,
+                    ..
+                } => {
+                    let unique_ident = node.unique_ident();
+                    let dispatch_fn = format_ident!("dispatch_{}_{}", root_name.to_string(), unique_ident);
 
-                        // Determine whether we need to turn the parsed argument into an option due
-                        // a default value
-                        let var_wrapper = if default.is_some() {
-                            None
-                        } else {
-                            Some(quote! { ::core::option::Option::Some })
-                        };
+                    // Determine whether we need to turn the parsed argument into an option due
+                    // a default value
+                    let var_wrapper = if default.is_some() {
+                        None
+                    } else {
+                        Some(quote! { ::core::option::Option::Some })
+                    };
 
-                        // Handle greedy strings
-                        let parser = if greedy.is_some() {
-                            quote! {
-                                __args.gobble_remaining().into()
-                            }
-                        } else {
-                            quote! {
-                                <#ty as ::quartz_commands::FromArgument<'cmd, _>>
-                                    ::from_arg(__arg, &#context_ident)?
-                            }
-                        };
+                    // Handle greedy strings
+                    let parser = if greedy.is_some() {
+                        quote! {
+                            __args.gobble_remaining().into()
+                        }
+                    } else {
+                        quote! {
+                            <#ty as ::quartz_commands::FromArgument<'cmd, _>>
+                                ::from_arg(__arg, &#context_ident)?
+                        }
+                    };
 
-                        Some(quote! {
-                            ::core::option::Option::Some(__arg) if
-                                <#ty as ::quartz_commands::FromArgument<'cmd, #context_type>>
-                                ::matches(__arg) =>
-                            {
-                                __data.#unique_ident = #var_wrapper (#parser);
-                                Self::#dispatch_fn(__args, #context_ident, __data)
-                            }
-                        })
-                    },
-
-                    Node::Literal { lit, .. } => {
-                        // Literals just forward to another dispatch function
-
-                        let dispatch_fn = format_ident!("dispatch_{}_{}", root_name, node.unique_ident());
-                        Some(quote! {
-                            ::core::option::Option::Some(#lit) =>
-                                Self::#dispatch_fn(__args, #context_ident, __data)
-                        })
-                    },
-
-                    _ => None
+                    Some(quote! {
+                        ::core::option::Option::Some(__arg) if
+                            <#ty as ::quartz_commands::FromArgument<'cmd, #context_type>>
+                            ::matches(__arg) =>
+                        {
+                            __data.#unique_ident = #var_wrapper (#parser);
+                            Self::#dispatch_fn(__args, #context_ident, __data)
+                        }
+                    })
                 }
-            });
+
+                Node::Literal { lit, .. } => {
+                    // Literals just forward to another dispatch function
+
+                    let dispatch_fn =
+                        format_ident!("dispatch_{}_{}", root_name.to_string(), node.unique_ident());
+                    Some(quote! {
+                        ::core::option::Option::Some(#lit) =>
+                            Self::#dispatch_fn(__args, #context_ident, __data)
+                    })
+                }
+
+                _ => None,
+            }
+        });
+
+        let track_visited = match unique_index {
+            Some(index) => {
+                let index_lit = Literal::usize_suffixed(index);
+                let error = match node_definition {
+                    Some(Node::Argument { name, .. }) => {
+                        let error_string = Literal::string(&format!(
+                            "Duplicate value provided for argument {}",
+                            name.as_str()
+                        ));
+                        quote! {
+                            #error_string.to_owned()
+                        }
+                    }
+                    Some(Node::Literal { lit, .. }) => {
+                        let error_string =
+                            Literal::string(&format!("Duplicate literal \"{}\"", lit.as_str()));
+                        quote! {
+                            #error_string.to_owned()
+                        }
+                    }
+                    _ => {
+                        quote! {
+                            "Node visited twice".to_owned()
+                        }
+                    }
+                };
+                Some(quote! {
+                    {
+                        let __mask = 1u128 << #index_lit;
+                        if (__data.__visited & __mask) == 0 {
+                            __data.__visited |= __mask;
+                        } else {
+                            return Err(#error);
+                        }
+                    }
+                })
+            }
+            _ => None,
+        };
 
         Some(quote! {
-            match __args.next() {
+            let __arg = __args.next();
+
+            #track_visited
+
+            match __arg {
                 #( #branches, )*
                 ::core::option::Option::Some(__arg @ _) => #default_some_arm,
                 ::core::option::Option::None => #none_arm
@@ -1036,7 +1168,7 @@ impl<'a> NodeGraph<'a> {
 
     fn gen_suggestions_match(
         &self,
-        root_name: &impl quote::IdentFragment,
+        root_name: &impl ToString,
         data_mod_name: &impl ToTokens,
         context_type: &Box<Type>,
         definition: Option<&Node>,
@@ -1054,6 +1186,7 @@ impl<'a> NodeGraph<'a> {
                 // Since we allow argument parsing to fail, we can't assume any args are defined
                 let unpack = self.gen_unpack_data_struct(root_name, data_mod_name, &[]);
 
+                // FIXME: make helper require a concrete type for better error messages
                 Some(quote! {
                     {
                         #unpack
@@ -1088,7 +1221,9 @@ impl<'a> NodeGraph<'a> {
             .any(|&node| matches!(node, Node::CommandRoot(_)))
         {
             let root_fn = ident_get_suggestions_node(root_name);
-            Some(quote! { __suggestions.extend(Self::#root_fn(__args, #context_ident, __data)); })
+            Some(
+                quote! { __suggestions.extend(Self::#root_fn(__args, #context_ident, __arg, __data)); },
+            )
         } else {
             None
         };
@@ -1103,7 +1238,7 @@ impl<'a> NodeGraph<'a> {
                 match node {
                     Node::Argument { greedy, ty: Some(ty), default, .. } => {
                         let unique_ident = node.unique_ident();
-                        let get_suggestions_fn = format_ident!("get_suggestions_{}_{}", root_name, unique_ident);
+                        let get_suggestions_fn = format_ident!("get_suggestions_{}_{}", root_name.to_string(), unique_ident);
 
                         let var_wrapper = if default.is_some() {
                             None
@@ -1139,7 +1274,7 @@ impl<'a> NodeGraph<'a> {
                     },
 
                     Node::Literal { lit, .. } => {
-                        let get_suggestions_fn = format_ident!("get_suggestions_{}_{}", root_name, node.unique_ident());
+                        let get_suggestions_fn = format_ident!("get_suggestions_{}_{}", root_name.to_string(), node.unique_ident());
                         Some(quote! {
                             if #lit.starts_with(__arg) {
                                 __suggestions.extend(Self::#get_suggestions_fn(__args, #context_ident, __arg, __data));
@@ -1164,6 +1299,7 @@ impl<'a> NodeGraph<'a> {
 
 struct NodeData<'a> {
     definition: &'a Node,
+    unique_index: Option<usize>,
     executes: Option<&'a HandlerBinding>,
     suggests: Option<&'a HandlerBinding>,
     successors: Vec<&'a Node>,
@@ -1171,9 +1307,14 @@ struct NodeData<'a> {
 }
 
 impl<'a> NodeData<'a> {
-    pub fn with_successors(definition: &'a Node, successors: Vec<&'a Node>) -> Self {
+    pub fn with_successors(
+        definition: &'a Node,
+        unique_index: Option<usize>,
+        successors: Vec<&'a Node>,
+    ) -> Self {
         NodeData {
             definition,
+            unique_index,
             executes: None,
             suggests: None,
             successors,
@@ -1187,14 +1328,14 @@ impl<'a> NodeData<'a> {
 /// use this struct to help out with that process, and make it interiorly-mutable for convenience.
 struct DefinedArguments<'a> {
     args: RefCell<Vec<&'a Node>>,
-    initialized: Cell<bool>
+    initialized: Cell<bool>,
 }
 
 impl<'a> DefinedArguments<'a> {
     const fn new() -> Self {
         DefinedArguments {
             args: RefCell::new(Vec::new()),
-            initialized: Cell::new(false)
+            initialized: Cell::new(false),
         }
     }
 
@@ -1216,28 +1357,29 @@ impl<'a> DefinedArguments<'a> {
                 }
             }
         } else {
-            self.args.borrow_mut().extend(defined_args.into_iter().copied());
+            self.args
+                .borrow_mut()
+                .extend(defined_args.into_iter().copied());
         }
     }
 }
 
-fn ident_dispatch_node<T: quote::IdentFragment>(name: &T) -> Ident {
-    format_ident!("dispatch_{}", name)
+fn ident_dispatch_node<T: ToString>(name: &T) -> Ident {
+    format_ident!("dispatch_{}", name.to_string())
 }
 
-fn ident_get_suggestions_node<T: quote::IdentFragment>(name: &T) -> Ident {
-    format_ident!("get_suggestions_{}", name)
+fn ident_get_suggestions_node<T: ToString>(name: &T) -> Ident {
+    format_ident!("get_suggestions_{}", name.to_string())
 }
 
-fn ident_data_struct<T: quote::IdentFragment>(name: &T) -> Ident {
-    format_ident!("CommandData{}", name)
+fn ident_data_struct<T: ToString>(name: &T) -> Ident {
+    format_ident!("CommandData{}", name.to_string().to_lowercase().replace("_", ""))
 }
 
 /// Returns whether or not the two nodes share the same name in a way that would cause a name conflict.
 fn node_name_eq(a: &Node, b: &Node) -> bool {
     match &(a, b) {
-        (Node::Argument { name: name0, .. }, Node::Argument { name: name1, .. }) =>
-            name0 == name1,
+        (Node::Argument { name: name0, .. }, Node::Argument { name: name1, .. }) => name0 == name1,
         (Node::Literal { lit: lit0, .. }, Node::Literal { lit: lit1, .. }) => lit0 == lit1,
         (
             Node::Argument { name: arg_name, .. },
