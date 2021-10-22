@@ -187,13 +187,7 @@ impl<'a, C> FromArgument<'a, C> for Help<'a> {
             0 => true,
             1 => partial_arg == "-" || partial_arg == "h",
             _ => {
-                let stripped = if partial_arg.starts_with("--") {
-                    &partial_arg[2 ..]
-                } else if partial_arg.starts_with("-") {
-                    &partial_arg[1 ..]
-                } else {
-                    partial_arg
-                };
+                let stripped = partial_arg.trim_start_matches('-');
                 "help".starts_with(stripped)
             }
         }
